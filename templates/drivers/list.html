@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}Shofyorlar | Shofir{% endblock %}
+{% block content %}
+<div class="card">
+  <h1 class="title">Shofyorlar ro'yxati va analitikasi</h1>
+  <p class="muted">Reyting, haydovchiga to‘langan summa (oy/yil), on-time, aktiv yuk va oxirgi lokatsiya. Klientdan tushum yo‘q.</p>
+  <div class="actions">
+    <a class="btn" href="{% url 'driver-create' %}">Yangi shofyor</a>
+    <a class="btn btn-secondary" href="{% url 'export-drivers-report-xlsx' %}">XLSX yuklash</a>
+  </div>
+</div>
+
+<div class="card">
+  <h2 class="title">Hujjatlar nazorati</h2>
+  <form method="get">
+    <div class="row-inline">
+      <div>
+        <label>Tasdiqlash holati</label>
+        <select name="verification_status">
+          <option value="all" {% if request.GET.verification_status == "all" or not request.GET.verification_status %}selected{% endif %}>Barchasi</option>
+          <option value="pending" {% if request.GET.verification_status == "pending" %}selected{% endif %}>Kutilmoqda</option>
+          <option value="approved" {% if request.GET.verification_status == "approved" %}selected{% endif %}>Tasdiqlangan</option>
+          <option value="rejected" {% if request.GET.verification_status == "rejected" %}selected{% endif %}>Rad etilgan</option>
+        </select>
+      </div>
+      <div>
+        <label>Muddati</label>
+        <select name="expiry">
+          <option value="all" {% if request.GET.expiry == "all" or not request.GET.expiry %}selected{% endif %}>Barchasi</option>
+          <option value="expired" {% if request.GET.expiry == "expired" %}selected{% endif %}>Muddati o‘tgan</option>
+          <option value="near" {% if request.GET.expiry == "near" %}selected{% endif %}>{{ driver_doc_expiry_near_days }} kunda tugaydi</option>
+          <option value="ok" {% if request.GET.expiry == "ok" %}selected{% endif %}>OK</option>
+        </select>
+      </div>
+      <div class="row-inline-action">
+        <button class="btn" type="submit">Filtr</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Shofyor</th>
+          <th>Telefon</th>
+          <th>Holat</th>
+          <th>Tasdiqlash</th>
+          <th>Hujjatlar</th>
+          <th>Mashinalar</th>
+          <th>Aktiv yuk</th>
+          <th>Reyting</th>
+          <th>On-time</th>
+          <th>Oylik</th>
+          <th>Yillik</th>
+          <th>Oxirgi lokatsiya</th>
+          <th>Tahrir</th>
+          <th>360</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for row in rows %}
+        <tr>
+          <td>{{ row.driver.full_name }}</td>
+          <td>{{ row.driver.phone }}</td>
+          <td>{{ row.driver.get_status_display }}</td>
+          <td>
+            {% if row.driver.verification_status == "pending" %}⏳ Kutilmoqda{% endif %}
+            {% if row.driver.verification_status == "approved" %}✅ Tasdiqlangan{% endif %}
+            {% if row.driver.verification_status == "rejected" %}❌ Rad etilgan{% endif %}
+          </td>
+          <td>
+            <b>{{ row.doc_score }}%</b>
+            <div class="muted" style="font-size:12px;margin-top:4px">
+              {{ row.doc_missing_summary }}
+              <br/>Muddati: {{ row.doc_expiry_state }}
+            </div>
+          </td>
+          <td>
+            {% for v in row.vehicles %}
+              {{ v.plate_number }}{% if not forloop.last %}, {% endif %}
+            {% empty %}
+              -
+            {% endfor %}
+          </td>
+          <td>{{ row.active_assignments }}</td>
+          <td>{% if row.snapshot %}{{ row.snapshot.rating_score }}{% else %}-{% endif %}</td>
+          <td>{% if row.snapshot %}{{ row.snapshot.on_time_rate }}%{% else %}-{% endif %}</td>
+          <td>{% if row.snapshot %}{{ row.snapshot.monthly_earnings }}{% else %}-{% endif %}</td>
+          <td>{% if row.snapshot %}{{ row.snapshot.yearly_earnings }}{% else %}-{% endif %}</td>
+          <td>
+            {% if row.location %}
+              {{ row.location.latitude }}, {{ row.location.longitude }}
+            {% else %}
+              -
+            {% endif %}
+          </td>
+          <td>
+            <a class="btn btn-secondary" href="{% url 'driver-edit' row.driver.id %}">Tahrirlash</a>
+            {% if row.driver.status != "offline" %}
+            <form method="post" action="{% url 'driver-archive' row.driver.id %}" style="display:inline">{% csrf_token %}
+              <button class="btn btn-secondary" type="submit">Arxiv</button>
+            </form>
+            {% else %}
+            <form method="post" action="{% url 'driver-restore' row.driver.id %}" style="display:inline">{% csrf_token %}
+              <button class="btn btn-secondary" type="submit">Qayta aktiv</button>
+            </form>
+            {% endif %}
+          </td>
+          <td><a class="btn btn-secondary" href="{% url 'driver-detail' row.driver.id %}">Ochish</a></td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="14">Shofyorlar topilmadi.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,14 @@
+{# Shofir: klientdan tushum yo‘q — faqat haydovchi va ichki xarajatlar. variant: compact | accounting #}
+{% with v=variant|default:"compact" %}
+{% if v == "accounting" %}
+<div class="alert alert-info app-alert biz-model-banner" role="note">
+  <strong>Buxgalteriya eslatmasi:</strong> biznesda klientlar sizga to‘lamaydi — pul faqat haydovchilarga va o‘z xarajatlaringizga (yoqilg‘i, qo‘shimcha, jarima) ketadi.
+  Jadvaldagi <strong>«klient narxi» / gross_revenue / tushum</strong> ustunlari ma’lumotlar bazasidagi maydon yig‘indisi; yangi buyurtmalarda ular odatda <strong>0</strong>.
+  Asosiy nazorat — <strong>haydovchi to‘lovi</strong> va <strong>sof foyda</strong> (chiqimlar bilan).
+</div>
+{% else %}
+<p class="biz-model-notice muted" role="note">
+  <strong>Biznes modeli:</strong> klientdan tushum yo‘q — faqat haydovchilarga to‘lov va ichki xarajatlar hisoblanadi.
+</p>
+{% endif %}
+{% endwith %}

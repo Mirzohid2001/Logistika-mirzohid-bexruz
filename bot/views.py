@@ -1,0 +1,2665 @@
+import html
+import json
+import logging
+import secrets
+import math
+import re
+from hmac import compare_digest
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
+from urllib.error import URLError
+
+from django.conf import settings
+from django.core.cache import cache
+from django.db import connection, transaction
+from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.utils import timezone as django_timezone
+from django.views.decorators.csrf import csrf_exempt
+
+from bot.copy_uz import (
+    BOT_DRIVER_ONLY_NOTICE,
+    DISPATCHER_PANEL_TITLE,
+    DRIVER_HELP,
+    DRIVER_HELP_IN_TRANSIT,
+    DRIVER_NOT_FOUND,
+    ORDER_NOT_FOUND,
+    REGISTER_FIRST,
+    UNKNOWN_COMMAND_DRIVER,
+    WEB_ONLY_CALLBACK_ANSWER,
+)
+from bot.models import CriticalActionConfirmation, DriverOnboardingState, TelegramMessageLog
+from bot.services import (
+    answer_callback_query,
+    build_active_trip_focus_message_html,
+    build_assign_candidates_keyboard,
+    build_dispatcher_panel_keyboard,
+    build_driver_wizard_keyboard,
+    build_driver_review_keyboard,
+    build_order_detail_keyboard,
+    build_pager_keyboard,
+    build_start_trip_driver_message_html,
+    driver_idle_reply_keyboard,
+    driver_reply_keyboard_for_order,
+    edit_chat_message,
+    edit_group_message,
+    normalize_driver_reply_text,
+    send_chat_message,
+    send_order_native_map_pins,
+)
+from dispatch.models import (
+    Assignment,
+    DriverOfferApproval,
+    DriverOfferDecision,
+    DriverOfferResponse,
+)
+from dispatch.services import assign_order
+from drivers.models import Driver, DriverStatus, DriverVerificationStatus
+from orders.models import Order, OrderStatus, QuantityUnit
+from orders.quantity import quantity_to_metric_tonnes
+from orders.services import transition_order
+from tracking.models import LocationPing, LocationSource
+from analytics.models import AlertEvent, AlertType
+from analytics.tasks import detect_location_fraud_task, detect_route_deviation_task
+
+logger = logging.getLogger(__name__)
+
+
+def _normalize_quantity_uom_token(token: str) -> str | None:
+    t = (token or "").lower().strip().rstrip(".")
+    if t in ("tonna", "ton", "t", "т"):
+        return QuantityUnit.TON
+    if t in ("kg", "кг"):
+        return QuantityUnit.KG
+    if t in ("litr", "litre", "l", "л", "liter"):
+        return QuantityUnit.LITER
+    return None
+
+
+def _parse_driver_hajm_command(parts: list[str]) -> tuple[Decimal | None, str | None, Decimal | None, str | None]:
+    """quantity, QuantityUnit, density (litr uchun ixtiyoriy agar buyurtmada zichlik bo‘lsa), xato matni."""
+    if len(parts) < 3:
+        return None, None, None, "Format: <code>/yuklandi 10.5 tonna</code> yoki <code>/topshirildi 12000 kg</code>"
+    try:
+        qty = Decimal(parts[1].replace(",", "."))
+        if qty <= 0:
+            return None, None, None, "Musbat son kiriting"
+    except Exception:
+        return None, None, None, "Birinchi raqam — hajm (masalan 10.5)"
+    uom = _normalize_quantity_uom_token(parts[2])
+    if not uom:
+        return None, None, None, "O‘lchov: <code>tonna</code>, <code>kg</code> yoki <code>litr</code> (+ zichlik)"
+    density = None
+    if uom == QuantityUnit.LITER and len(parts) >= 4:
+        try:
+            density = Decimal(parts[3].replace(",", "."))
+            if density <= 0:
+                return None, None, None, "Zichlik 0 dan katta bo‘lsin (kg/L)"
+        except Exception:
+            return None, None, None, "Zichlik noto‘g‘ri (masalan 0.84)"
+    return qty, uom, density, None
+
+
+_ONB_FIRST_TOTAL = 11
+_ONB_TRUCK_EXTRA_TOTAL = 6
+_ONB_DATE_HINT = (
+    "Quyidagi formatlardan <b>birini</b> yozing:\n"
+    "• <code>2024-05-01</code>\n"
+    "• <code>15.03.2024</code>"
+)
+_ONB_PHOTO_HINT = (
+    "📎 <b>Clip</b> → <b>Rasm</b> yoki <b>Fotosurat</b>dan yuboring.\n"
+    "Rasm aniq va to'liq ko'rinsin."
+)
+
+
+def _onb_progress_bar(current: int, total: int) -> str:
+    if total <= 0:
+        return ""
+    width = 8
+    filled = int(round(width * current / total))
+    filled = min(width, max(0, filled))
+    return "█" * filled + "░" * (width - filled) + f"  {current}/{total}"
+
+
+def _onb_first_block(current: int, emoji: str, title: str, body: str) -> str:
+    bar = html.escape(_onb_progress_bar(current, _ONB_FIRST_TOTAL))
+    return (
+        "<b>📋 Haydovchi ro'yxatdan o'tishi</b>\n"
+        f"<code>{bar}</code>\n\n"
+        f"{emoji} <b>{html.escape(title)}</b>\n\n"
+        f"{body}"
+    )
+
+
+def _onb_truck_block(current: int, emoji: str, title: str, body: str) -> str:
+    bar = html.escape(_onb_progress_bar(current, _ONB_TRUCK_EXTRA_TOTAL))
+    return (
+        "<b>🚛 Texnika (qo'shimcha)</b>\n"
+        f"<code>{bar}</code>\n\n"
+        f"{emoji} <b>{html.escape(title)}</b>\n\n"
+        f"{body}"
+    )
+
+
+def _onb_truck_mode(payload: dict) -> bool:
+    return bool((payload or {}).get("onb_truck_only"))
+
+
+@csrf_exempt
+def webhook(request: HttpRequest) -> HttpResponse:
+    if request.method != "POST":
+        return HttpResponse(status=405)
+    secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if settings.TELEGRAM_WEBHOOK_SECRET and not compare_digest(secret, settings.TELEGRAM_WEBHOOK_SECRET):
+        logger.warning(
+            "telegram_webhook_403: X-Telegram-Bot-Api-Secret-Token mos emas yoki yo'q. "
+            "setWebhook da secret_token .env dagi TELEGRAM_WEBHOOK_SECRET bilan bir xil bo'lishi kerak."
+        )
+        # Telegram qayta-qayta urinmasligi uchun 403 qaytaramiz, lekin diagnostika uchun DB'ga ham yozib qo'yamiz.
+        try:
+            raw = request.body.decode("utf-8")
+            payload = json.loads(raw) if raw else {}
+        except Exception:
+            payload = {}
+        callback_query = payload.get("callback_query") or {}
+        user = callback_query.get("from") or {}
+        TelegramMessageLog.objects.create(
+            chat_id="",
+            message_id="",
+            event="webhook_forbidden",
+            payload={
+                "has_secret_header": bool(secret),
+                "user_id": user.get("id"),
+                "callback_data": callback_query.get("data"),
+                "update_id": payload.get("update_id"),
+            },
+            signature="(mismatch)",
+            source_ip=request.META.get("HTTP_X_FORWARDED_FOR", request.META.get("REMOTE_ADDR", "")),
+        )
+        return HttpResponse(status=403)
+    source_ip = request.META.get("HTTP_X_FORWARDED_FOR", request.META.get("REMOTE_ADDR", ""))
+    try:
+        payload = json.loads(request.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        # Do not return 400 to Telegram to avoid endless retries on malformed payload.
+        return JsonResponse({"ok": True})
+
+    update_id = payload.get("update_id")
+    dedup_key = f"tg:webhook:update:{update_id}" if isinstance(update_id, int) else None
+    if dedup_key and cache.get(dedup_key):
+        return JsonResponse({"ok": True})
+
+    try:
+        callback_query = payload.get("callback_query")
+        if callback_query:
+            _handle_callback(callback_query, signature=secret, source_ip=source_ip)
+            if dedup_key:
+                cache.set(dedup_key, "1", 86400)
+            return JsonResponse({"ok": True})
+        edited_message = payload.get("edited_message") or {}
+        if edited_message:
+            # Telegram Live Location yangilanishlari shu yerda keladi (Yandex Taxi kabi).
+            _handle_message(edited_message, signature=secret, source_ip=source_ip)
+            if dedup_key:
+                cache.set(dedup_key, "1", 86400)
+            return JsonResponse({"ok": True})
+        message = payload.get("message") or {}
+        if message:
+            _handle_message(message, signature=secret, source_ip=source_ip)
+            if dedup_key:
+                cache.set(dedup_key, "1", 86400)
+            return JsonResponse({"ok": True})
+    except Exception as exc:
+        callback_query = payload.get("callback_query") or {}
+        callback_data = str(callback_query.get("data", ""))
+        user = callback_query.get("from") or {}
+        TelegramMessageLog.objects.create(
+            chat_id="",
+            message_id="",
+            event="webhook_error",
+            payload={
+                "error": str(exc),
+                "callback_data": callback_data,
+                "user_id": user.get("id"),
+            },
+            signature=secret,
+            source_ip=source_ip,
+        )
+        return JsonResponse({"ok": True})
+    if dedup_key:
+        cache.set(dedup_key, "1", 86400)
+    return JsonResponse({"ok": True})
+
+
+def _location_captured_at_from_message(message: dict | None) -> datetime:
+    if not message:
+        return django_timezone.now()
+    ts = message.get("edit_date") or message.get("date")
+    if isinstance(ts, int):
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    return django_timezone.now()
+
+
+def _save_location(telegram_user_id: int, location: dict, message: dict | None = None) -> None:
+    driver = Driver.objects.filter(telegram_user_id=telegram_user_id).first()
+    if not driver:
+        return
+    assignment = (
+        Assignment.objects.select_related("order")
+        .filter(driver=driver, order__status__in=[OrderStatus.ASSIGNED, OrderStatus.IN_TRANSIT])
+        .order_by("-assigned_at")
+        .first()
+    )
+    if not assignment:
+        return
+    prev_ping = (
+        LocationPing.objects.filter(order=assignment.order, driver=driver)
+        .order_by("-captured_at")
+        .first()
+    )
+    try:
+        lat = float(location.get("latitude"))
+        lon = float(location.get("longitude"))
+    except (TypeError, ValueError):
+        return
+    if not _is_uzbekistan_bbox(lat, lon):
+        cache_key = f"gps_warn:{driver.pk}:{assignment.order_id}"
+        if cache.add(cache_key, "1", timeout=600):
+            send_chat_message(
+                str(driver.telegram_user_id or ""),
+                "📍 Lokatsiya xato ko'rinyapti (UZ hududidan tashqari). GPS ni yoqib, qayta yuboring.",
+            )
+        return
+    order_point = _extract_coords_text(assignment.order.from_location)
+    if order_point and prev_ping is None:
+        dist = _distance_km(lat, lon, order_point[0], order_point[1])
+        if dist > settings.GPS_MAX_DISTANCE_FROM_ORDER_KM:
+            send_chat_message(
+                str(driver.telegram_user_id or ""),
+                "⚠️ Lokatsiya buyurtma nuqtasidan juda uzoq. Telefon GPS sozlamasini tekshiring.",
+            )
+            return
+    interval = int(getattr(settings, "TELEGRAM_LIVE_LOCATION_SAVE_INTERVAL_SEC", 5) or 0)
+    if interval > 0:
+        throttle_key = f"tg:liveloc:{driver.pk}:{assignment.order_id}"
+        if not cache.add(throttle_key, "1", timeout=interval):
+            return
+    captured_at = _location_captured_at_from_message(message)
+    created = LocationPing.objects.create(
+        order=assignment.order,
+        driver=driver,
+        latitude=lat,
+        longitude=lon,
+        source=LocationSource.TELEGRAM,
+        captured_at=captured_at,
+    )
+    if prev_ping:
+        try:
+            detect_route_deviation_task.delay(
+                assignment.order_id,
+                driver.id,
+                float(created.latitude),
+                float(created.longitude),
+            )
+            detect_location_fraud_task.delay(assignment.order_id, driver.id)
+        except Exception:
+            detect_route_deviation_task(
+                assignment.order_id,
+                driver.id,
+                float(created.latitude),
+                float(created.longitude),
+            )
+            detect_location_fraud_task(assignment.order_id, driver.id)
+
+
+def _handle_assigned_driver_group_callback(
+    callback_query: dict,
+    *,
+    driver: Driver,
+    order: Order,
+    action: str,
+    signature: str,
+    source_ip: str,
+) -> None:
+    callback_id = str(callback_query.get("id", ""))
+    chat_id = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
+    message_id = str(callback_query.get("message", {}).get("message_id", ""))
+    username = (callback_query.get("from") or {}).get("username") or str(driver.pk)
+
+    if not Assignment.objects.filter(order=order, driver=driver).exists():
+        _safe_answer(callback_id, "Bu buyurtma sizga biriktirilmagan.")
+        return
+
+    if TelegramMessageLog.objects.filter(event="callback", payload__callback_query_id=callback_id).exists():
+        _safe_answer(callback_id, "Action allaqachon bajarilgan")
+        return
+
+    if action == "finish_req":
+        if order.status != OrderStatus.IN_TRANSIT:
+            _safe_answer(callback_id, "Tugatish faqat yo‘lda holatida.")
+            return
+        TelegramMessageLog.objects.create(
+            order=order,
+            chat_id=chat_id,
+            message_id=message_id,
+            event="driver_finish_requested",
+            signature=signature,
+            source_ip=source_ip,
+            payload={"driver_id": driver.pk, "source": "group_callback"},
+        )
+        TelegramMessageLog.objects.create(
+            order=order,
+            chat_id=chat_id,
+            message_id=message_id,
+            event="callback",
+            dedupe_key=f"callback:{callback_id}",
+            signature=signature,
+            source_ip=source_ip,
+            payload={
+                "callback_query_id": callback_id,
+                "action": "finish_req",
+                "changed": False,
+                "by": username,
+                "actor_id": driver.telegram_user_id,
+                "from_status": order.status,
+                "to_status": order.status,
+            },
+        )
+        _safe_answer(callback_id, "So‘rov qabul qilindi. Admin webda tasdiqlaydi.")
+        return
+
+    changed = False
+    from_status = order.status
+
+    if action == "start":
+        if order.status != OrderStatus.ASSIGNED:
+            _safe_answer(callback_id, f"Hozirgi holat: {order.get_status_display()}")
+            return
+        with transaction.atomic():
+            locked = Order.objects.select_for_update().filter(pk=order.pk).first()
+            changed = bool(locked) and transition_order(locked, OrderStatus.IN_TRANSIT, changed_by=driver.full_name)
+            order = locked or order
+    elif action == "issue":
+        with transaction.atomic():
+            locked = Order.objects.select_for_update().filter(pk=order.pk).first()
+            if not locked:
+                changed = False
+            else:
+                changed = transition_order(locked, OrderStatus.ISSUE, changed_by=driver.full_name)
+                order = locked
+    else:
+        _safe_answer(callback_id, "Action topilmadi")
+        return
+
+    TelegramMessageLog.objects.create(
+        order=order,
+        chat_id=chat_id,
+        message_id=message_id,
+        event="callback",
+        dedupe_key=f"callback:{callback_id}",
+        signature=signature,
+        source_ip=source_ip,
+        payload={
+            "callback_query_id": callback_id,
+            "action": action,
+            "changed": changed,
+            "by": username,
+            "actor_id": driver.telegram_user_id,
+            "from_status": from_status,
+            "to_status": order.status,
+        },
+    )
+    if changed:
+        _safe_edit(chat_id, message_id, order)
+        _safe_answer(callback_id, f"Status -> {order.get_status_display()}")
+        if action == "start" and driver.telegram_user_id:
+            order.refresh_from_db()
+            send_chat_message(
+                str(driver.telegram_user_id),
+                build_start_trip_driver_message_html(
+                    order, for_telegram_user_id=driver.telegram_user_id or None
+                ),
+                parse_mode="HTML",
+                reply_markup=driver_reply_keyboard_for_order(
+                    order, telegram_user_id=driver.telegram_user_id or 0
+                ),
+                disable_web_page_preview=True,
+            )
+            send_order_native_map_pins(str(driver.telegram_user_id), order)
+    else:
+        _safe_answer(callback_id, "Status o'zgarmadi")
+
+
+def _driver_offer_precheck_callback(
+    callback_query: dict,
+    *,
+    driver: Driver,
+    order: Order | None,
+    callback_id: str,
+) -> bool:
+    """True = davom etish mumkin. False = allaqachon javob berilgan."""
+    if driver.verification_status != DriverVerificationStatus.APPROVED:
+        _safe_answer(callback_id, "Hujjatlaringiz hali tasdiqlanmadi. Admin tekshiradi.")
+        send_chat_message(
+            str(driver.telegram_user_id or ""),
+            "⚠️ Hujjatlaringiz hali tasdiqlanmadi. Admin ko'rib chiqyapti.",
+        )
+        return False
+    if _driver_has_expired_documents(driver):
+        issues = _driver_expired_documents_issues(driver)
+        today = django_timezone.localdate()
+        has_actual_expired = bool(driver.license_expires_at and driver.license_expires_at < today) or any(
+            v.calibration_expires_at and v.calibration_expires_at < today for v in driver.vehicles.all()
+        )
+        if has_actual_expired and order:
+            alert, created = AlertEvent.objects.get_or_create(
+                order=order,
+                alert_type=AlertType.DRIVER_DOC_EXPIRED,
+                threshold_minutes=0,
+                defaults={
+                    "driver": driver,
+                    "message": "Hujjat expired: " + ", ".join(issues[:3]) if issues else "Hujjat expired",
+                },
+            )
+            if created:
+                cache.delete("ops_dashboard_v1")
+        _safe_answer(callback_id, "Hujjatlar muddati tugagan. Ofis (admin) ga murojaat qiling.")
+        send_chat_message(
+            str(driver.telegram_user_id or ""),
+            "❌ Yukni qabul qilib bo'lmaydi: hujjat muddati tugagan. Hujjatlarni yangilang.",
+        )
+        return False
+    return True
+
+
+def _handle_callback(callback_query: dict, signature: str = "", source_ip: str = "") -> None:
+    callback_id = str(callback_query.get("id", ""))
+    user = callback_query.get("from") or {}
+    user_id = int(user.get("id", 0))
+    callback_data = str(callback_query.get("data", ""))
+    dispatcher_ids = set(getattr(settings, "DISPATCHER_TELEGRAM_USER_IDS", []) or [])
+    linked_driver = Driver.objects.filter(telegram_user_id=user_id).first()
+    dispatcher_only = user_id in dispatcher_ids and not linked_driver
+
+    if dispatcher_only:
+        _safe_answer(callback_id, WEB_ONLY_CALLBACK_ANSWER)
+        return
+
+    if callback_data.startswith(("ui:", "ord:", "review:")):
+        _safe_answer(callback_id, WEB_ONLY_CALLBACK_ANSWER)
+        return
+
+    if callback_data.startswith(("drv:", "order:")):
+        if not _acquire_callback_lock(user_id=user_id, callback_data=callback_data):
+            _safe_answer(callback_id, "Iltimos, 2-3 soniya kuting...")
+            return
+
+    if callback_data.startswith("order:"):
+        parts = callback_data.split(":")
+        if len(parts) < 3 or not parts[1].isdigit():
+            _safe_answer(callback_id, "Noto'g'ri action")
+            return
+        order_id = int(parts[1])
+        action = parts[2]
+        if action == "cancel":
+            action = "reject"
+        try:
+            order = Order.objects.filter(pk=order_id).first()
+        except InvalidOperation:
+            _repair_order_decimals(order_id)
+            order = Order.objects.filter(pk=order_id).first()
+        if not order:
+            _safe_answer(callback_id, "Buyurtma topilmadi")
+            return
+
+        if action in {"assign", "reassign"} or (action == "complete"):
+            _safe_answer(callback_id, WEB_ONLY_CALLBACK_ANSWER)
+            return
+
+        driver = Driver.objects.filter(telegram_user_id=user_id).first()
+        if not driver:
+            _safe_answer(callback_id, "Avval /start bosing va raqamni yuboring")
+            return
+
+        if action in {"start", "finish_req"}:
+            _handle_assigned_driver_group_callback(
+                callback_query,
+                driver=driver,
+                order=order,
+                action=action,
+                signature=signature,
+                source_ip=source_ip,
+            )
+            return
+
+        if action == "issue":
+            if order.status in {OrderStatus.ASSIGNED, OrderStatus.IN_TRANSIT}:
+                _handle_assigned_driver_group_callback(
+                    callback_query,
+                    driver=driver,
+                    order=order,
+                    action="issue",
+                    signature=signature,
+                    source_ip=source_ip,
+                )
+                return
+            if order.status in {OrderStatus.NEW, OrderStatus.OFFERED, OrderStatus.ISSUE}:
+                if not _driver_offer_precheck_callback(callback_query, driver=driver, order=order, callback_id=callback_id):
+                    return
+                _handle_driver_offer_callback(callback_query, f"order:{order_id}:issue", driver)
+                return
+            _safe_answer(callback_id, f"Bu holatda Muammo tugmasi ishlamaydi: {order.get_status_display()}")
+            return
+
+        if action in {"accept", "reject"}:
+            if order.status not in {OrderStatus.NEW, OrderStatus.OFFERED, OrderStatus.ISSUE}:
+                _safe_answer(callback_id, f"Taklif tugmalari bu holatda ishlamaydi: {order.get_status_display()}")
+                return
+            if not _driver_offer_precheck_callback(callback_query, driver=driver, order=order, callback_id=callback_id):
+                return
+            _handle_driver_offer_callback(callback_query, f"order:{order_id}:{action}", driver)
+            return
+
+        _safe_answer(callback_id, WEB_ONLY_CALLBACK_ANSWER)
+        return
+
+    if callback_data.startswith("onb:"):
+        _handle_onboarding_callback(callback_query, callback_data)
+        return
+
+    if callback_data.startswith("drv:"):
+        driver = Driver.objects.filter(telegram_user_id=user_id).first()
+        if not driver:
+            _safe_answer(callback_id, "Siz driver sifatida bog'lanmagansiz")
+            return
+        _safe_answer(callback_id, "⏳ Driver wizard...")
+        _handle_driver_wizard_callback(callback_query, callback_data)
+        return
+
+    _safe_answer(callback_id, "Noto'g'ri action")
+
+
+def _log_ui_or_card_callback(
+    callback_query: dict,
+    *,
+    action: str,
+    order: Order | None = None,
+    ok: bool = True,
+    changed: bool | None = None,
+) -> None:
+    """
+    UI/ord/drv callback’lari uchun `event="callback"` audit log.
+
+    `_handle_callback` ichida bu log faqat `order:*` branch’da yaratiladi, shuning uchun
+    ui:/ord:/drv: handler’larida ham auditga yozish kerak.
+    """
+    callback_id = str(callback_query.get("id", "") or "")
+    if not callback_id:
+        return
+
+    if TelegramMessageLog.objects.filter(event="callback", payload__callback_query_id=callback_id).exists():
+        return
+
+    user = callback_query.get("from") or {}
+    actor_id = 0
+    try:
+        actor_id = int(user.get("id", 0) or 0)
+    except (TypeError, ValueError):
+        actor_id = 0
+    by = user.get("username") or str(actor_id or "unknown")
+
+    chat_id = str(callback_query.get("message", {}).get("chat", {}).get("id", "") or "")
+    message_id = str(callback_query.get("message", {}).get("message_id", "") or "")
+
+    payload: dict = {
+        "callback_query_id": callback_id,
+        "action": action,
+        "ok": ok,
+        "by": by,
+        "actor_id": actor_id,
+    }
+    if changed is not None:
+        payload["changed"] = changed
+
+    TelegramMessageLog.objects.create(
+        order=order,
+        chat_id=chat_id,
+        message_id=message_id,
+        event="callback",
+        dedupe_key=f"callback:{callback_id}",
+        payload=payload,
+    )
+
+
+def _safe_answer(callback_id: str, text: str) -> None:
+    if not callback_id:
+        return
+    try:
+        answer_callback_query(callback_id, text=text)
+    except URLError:
+        return
+
+
+def _safe_edit(chat_id: str, message_id: str, order: Order) -> None:
+    try:
+        edit_group_message(chat_id, message_id, order)
+    except (URLError, ValueError):
+        return
+
+
+def _safe_edit_text(
+    chat_id: str,
+    message_id: str,
+    text: str,
+    reply_markup: dict | None = None,
+    parse_mode: str | None = None,
+) -> None:
+    try:
+        edit_chat_message(chat_id, message_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except (URLError, ValueError):
+        return
+
+
+def _handle_order_card_callback(callback_query: dict, callback_data: str) -> None:
+    chat_id = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
+    message_id = str(callback_query.get("message", {}).get("message_id", ""))
+    user = callback_query.get("from") or {}
+    changed_by = user.get("username") or str(user.get("id", "dispatcher"))
+    parts = callback_data.split(":")
+    if len(parts) < 3:
+        return
+    action = parts[1]
+    if not parts[2].isdigit():
+        return
+    order_id = int(parts[2])
+    order = Order.objects.filter(pk=order_id).first()
+    if not order:
+        _safe_edit_text(chat_id, message_id, html.escape(ORDER_NOT_FOUND), parse_mode="HTML")
+        return
+    if action == "refresh":
+        _log_ui_or_card_callback(callback_query, action=action, order=order, ok=True)
+        _safe_edit_text(
+            chat_id,
+            message_id,
+            _build_dispatcher_order_detail_message(order_id),
+            build_order_detail_keyboard(order),
+            parse_mode="HTML",
+        )
+        return
+    if action == "assign_menu":
+        _log_ui_or_card_callback(callback_query, action=action, order=order, ok=True)
+        _safe_edit_text(
+            chat_id,
+            message_id,
+            f"<b>Buyurtma #{order.pk}</b>\nQuyidagi haydovchilardan birini tanlang (ETA va ⭐):",
+            reply_markup=build_assign_candidates_keyboard(order),
+            parse_mode="HTML",
+        )
+        return
+    if action == "assign" and len(parts) > 3 and parts[3].isdigit():
+        before_status = order.status
+        text = _dispatcher_assign(order_id, int(parts[3]), changed_by=changed_by)
+        order.refresh_from_db()
+        _log_ui_or_card_callback(
+            callback_query,
+            action=action,
+            order=order,
+            ok=True,
+            changed=(order.status != before_status),
+        )
+        _safe_edit_text(
+            chat_id,
+            message_id,
+            f"{html.escape(text)}\n\n{_build_dispatcher_order_detail_message(order_id)}",
+            build_order_detail_keyboard(order),
+            parse_mode="HTML",
+        )
+        return
+    if action == "unassign":
+        before_status = order.status
+        text = _dispatcher_unassign(order_id, changed_by=changed_by)
+        order.refresh_from_db()
+        _log_ui_or_card_callback(
+            callback_query,
+            action=action,
+            order=order,
+            ok=True,
+            changed=(order.status != before_status),
+        )
+        _safe_edit_text(
+            chat_id,
+            message_id,
+            f"{html.escape(text)}\n\n{_build_dispatcher_order_detail_message(order_id)}",
+            build_order_detail_keyboard(order),
+            parse_mode="HTML",
+        )
+        return
+
+
+def _handle_driver_wizard_callback(callback_query: dict, callback_data: str) -> None:
+    chat_id = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
+    message_id = str(callback_query.get("message", {}).get("message_id", ""))
+    user = callback_query.get("from") or {}
+    telegram_user_id = int(user.get("id", 0))
+    if not telegram_user_id:
+        return
+    driver = Driver.objects.filter(telegram_user_id=telegram_user_id).first()
+    if not driver:
+        _safe_edit_text(chat_id, message_id, REGISTER_FIRST, parse_mode="HTML")
+        return
+    parts = callback_data.split(":")
+    if len(parts) < 3 or not parts[2].isdigit():
+        return
+    action = parts[1]
+    if action == "cancel":
+        _log_ui_or_card_callback(callback_query, action=action, order=None, ok=True)
+        _safe_edit_text(chat_id, message_id, "❌ <b>Wizard bekor qilindi.</b>", parse_mode="HTML")
+        return
+    order = _resolve_driver_order(driver, parts[2])
+    if not order:
+        _safe_edit_text(chat_id, message_id, "Faol buyurtma topilmadi.")
+        return
+
+    if action in {"checkpoint", "summary", "back"}:
+        _log_ui_or_card_callback(callback_query, action=action, order=order, ok=True)
+
+    if action == "start":
+        with transaction.atomic():
+            locked_order = Order.objects.select_for_update().filter(pk=order.pk).first()
+            changed = bool(locked_order) and transition_order(locked_order, OrderStatus.IN_TRANSIT, changed_by=driver.full_name)
+            order = locked_order or order
+        _log_ui_or_card_callback(callback_query, action=action, order=order, ok=True, changed=changed)
+        text = "✅ Safar boshlandi." if changed else "❌ Safarni boshlab bo‘lmadi (holat mos emas)."
+        step = 1
+    elif action == "checkpoint":
+        TelegramMessageLog.objects.create(
+            order=order,
+            chat_id=chat_id,
+            message_id=message_id,
+            event="driver_checkpoint",
+            payload={"driver_id": driver.pk, "note": "Wizard checkpoint"},
+        )
+        text = "✅ Checkpoint yozib olindi."
+        step = 2
+    elif action == "summary":
+        pings_count = LocationPing.objects.filter(order=order, driver=driver).count()
+        checkpoints_count = TelegramMessageLog.objects.filter(order=order, event="driver_checkpoint").count()
+        text = (
+            f"📊 Checkpoint: {checkpoints_count} · Lokatsiya: {pings_count} · "
+            f"Holat: {order.get_status_display()}"
+        )
+        step = 3
+    elif action == "finish":
+        with transaction.atomic():
+            locked_order = Order.objects.select_for_update().filter(pk=order.pk).first()
+            changed = bool(locked_order) and transition_order(locked_order, OrderStatus.COMPLETED, changed_by=driver.full_name)
+            order = locked_order or order
+        _log_ui_or_card_callback(callback_query, action=action, order=order, ok=True, changed=changed)
+        if changed:
+            driver.status = DriverStatus.AVAILABLE
+            driver.save(update_fields=["status", "updated_at"])
+            if driver.telegram_user_id:
+                send_chat_message(
+                    str(driver.telegram_user_id),
+                    "✅ Reys tizimda yopildi. Yangi takliflar uchun guruhni kuzating.",
+                    reply_markup=driver_idle_reply_keyboard(),
+                )
+        text = "✅ Safar yakunlandi." if changed else "❌ Safarni tugatib bo‘lmadi (holat mos emas)."
+        step = 4
+    elif action == "back":
+        step = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
+        text = "⬅️ Oldingi qadam."
+    else:
+        text = "Amal topilmadi."
+        step = 1
+    order.refresh_from_db()
+    if action == "start" and changed and driver.telegram_user_id:
+        send_chat_message(
+            str(driver.telegram_user_id),
+            build_start_trip_driver_message_html(
+                order, for_telegram_user_id=driver.telegram_user_id or None
+            ),
+            parse_mode="HTML",
+            reply_markup=driver_reply_keyboard_for_order(
+                order, telegram_user_id=driver.telegram_user_id or 0
+            ),
+            disable_web_page_preview=True,
+        )
+        send_order_native_map_pins(str(driver.telegram_user_id), order)
+    trip_in_progress = order.status == OrderStatus.IN_TRANSIT
+    _safe_edit_text(
+        chat_id,
+        message_id,
+        _build_driver_wizard_text(order.pk, step, text, order.get_status_display()),
+        reply_markup=build_driver_wizard_keyboard(
+            order.pk, current_step=step, trip_in_progress=trip_in_progress
+        ),
+        parse_mode="HTML",
+    )
+
+
+def _handle_driver_offer_callback(callback_query: dict, callback_data: str, driver: Driver) -> None:
+    callback_id = str(callback_query.get("id", ""))
+    parts = callback_data.split(":")
+    if len(parts) < 3 or parts[0] != "order" or not parts[1].isdigit():
+        _safe_answer(callback_id, "Action xato")
+        return
+    order_id = int(parts[1])
+    try:
+        order = Order.objects.filter(pk=order_id).first()
+    except InvalidOperation:
+        _repair_order_decimals(order_id)
+        order = Order.objects.filter(pk=order_id).first()
+    action = parts[2]
+    if not order or action not in {"accept", "reject", "issue"}:
+        _safe_answer(callback_id, "Order/action topilmadi")
+        return
+    if order.status in {OrderStatus.COMPLETED, OrderStatus.CANCELED}:
+        _safe_answer(callback_id, "Bu buyurtma yakunlangan")
+        return
+    if order.status not in {OrderStatus.NEW, OrderStatus.OFFERED, OrderStatus.ISSUE}:
+        _safe_answer(callback_id, f"Taklif tugmalari bu holatda ishlamaydi: {order.get_status_display()}")
+        return
+
+    decision = DriverOfferDecision.ACCEPT
+    approval = DriverOfferApproval.PENDING
+    note = ""
+    if action == "reject":
+        decision = DriverOfferDecision.REJECT
+        approval = DriverOfferApproval.DECLINED
+    elif action == "issue":
+        decision = DriverOfferDecision.ISSUE
+        approval = DriverOfferApproval.PENDING
+        note = "Driver muammo tugmasini bosdi"
+
+    response, _ = DriverOfferResponse.objects.update_or_create(
+        order=order,
+        driver=driver,
+        defaults={
+            "decision": decision,
+            "approval_status": approval,
+            "note": note,
+            "responded_at": django_timezone.now(),
+            "reviewed_by": "",
+            "reviewed_at": None,
+        },
+    )
+
+    if decision == DriverOfferDecision.ACCEPT:
+        order.refresh_from_db()
+        if order.status not in {OrderStatus.NEW, OrderStatus.OFFERED, OrderStatus.ISSUE}:
+            response.approval_status = DriverOfferApproval.DECLINED
+            response.note = "Buyurtma holati o'zgardi (taklif tugashi)"
+            response.reviewed_by = "system"
+            response.reviewed_at = django_timezone.now()
+            response.save(update_fields=["approval_status", "note", "reviewed_by", "reviewed_at"])
+            send_chat_message(
+                str(driver.telegram_user_id),
+                (
+                    f"❌ Buyurtma #{order.pk} endi «Qabul» orqali olinmaydi "
+                    f"(holat: {order.get_status_display()}). "
+                    "Boshqa haydovchiga biriktirilgan yoki webdan yangilangan bo‘lishi mumkin — guruhdagi xabarni tekshiring."
+                ),
+            )
+            _safe_answer(callback_id, "Buyurtma holati o‘zgardi")
+            return
+        blocking_a = (
+            Assignment.objects.select_related("order")
+            .filter(
+                driver=driver,
+                order__status__in=[OrderStatus.ASSIGNED, OrderStatus.IN_TRANSIT],
+            )
+            .exclude(order=order)
+            .order_by("-assigned_at")
+            .first()
+        )
+        if blocking_a:
+            bo = blocking_a.order
+            response.approval_status = DriverOfferApproval.DECLINED
+            response.note = "Driver band (zanyat)"
+            response.reviewed_by = "system"
+            response.reviewed_at = django_timezone.now()
+            response.save(update_fields=["approval_status", "note", "reviewed_by", "reviewed_at"])
+            send_chat_message(
+                str(driver.telegram_user_id),
+                (
+                    f"❌ Avval buyurtma #{bo.pk} ni yakunlang (holat: {bo.get_status_display()}). "
+                    f"Yangi taklif: #{order.pk}.\n\n"
+                    "<b>Nima qilish kerak:</b>\n"
+                    "• Holatni ko‘rish: <code>/trip_summary</code> yoki <code>/trip_summary "
+                    f"{bo.pk}</code>\n"
+                    "• Agar hali yo‘lga chiqmagan bo‘lsangiz: guruhda «Yo‘lda (safar boshlash)» yoki "
+                    "<code>/start_trip</code>\n"
+                    "• Yo‘lda bo‘lsangiz: <code>/finish_trip</code> — keyin <b>admin web</b>da "
+                    "tugatishni tasdiqlashi kerak.\n"
+                    "• Eskicha qotib qolgan bo‘lsa — dispetcher bilan bog‘laning."
+                ),
+                parse_mode="HTML",
+            )
+            _safe_answer(callback_id, "Boshqa buyurtmada band")
+            return
+        TelegramMessageLog.objects.create(
+            order=order,
+            chat_id=str(driver.telegram_user_id or ""),
+            message_id="",
+            event="driver_offer_response",
+            payload={"decision": "accept", "approval_status": "pending", "driver_id": driver.pk},
+        )
+        _safe_answer(callback_id, "✅ So'rovingiz qabul qilindi. Admin web panelda tasdiqlaydi.")
+        return
+    if decision == DriverOfferDecision.REJECT:
+        TelegramMessageLog.objects.create(
+            order=order,
+            chat_id=str(driver.telegram_user_id or ""),
+            message_id="",
+            event="driver_offer_response",
+            payload={"decision": "reject", "approval_status": "declined", "driver_id": driver.pk},
+        )
+        _safe_answer(callback_id, "✅ Rad javobi yuborildi")
+        return
+    TelegramMessageLog.objects.create(
+        order=order,
+        chat_id=str(driver.telegram_user_id or ""),
+        message_id="",
+        event="driver_offer_response",
+        payload={"decision": "issue", "approval_status": "pending", "driver_id": driver.pk},
+    )
+    _safe_answer(callback_id, "✅ Muammo signali yuborildi")
+
+
+def _handle_dispatcher_review_callback(callback_query: dict, callback_data: str) -> None:
+    callback_id = str(callback_query.get("id", ""))
+    user = callback_query.get("from") or {}
+    username = user.get("username") or str(user.get("id", "dispatcher"))
+    parts = callback_data.split(":")
+    if len(parts) != 4 or not parts[1].isdigit() or not parts[2].isdigit():
+        _safe_answer(callback_id, "Review format xato")
+        return
+    order = Order.objects.filter(pk=int(parts[1])).first()
+    driver = Driver.objects.filter(pk=int(parts[2])).first()
+    action = parts[3]
+    if not order or not driver:
+        _safe_answer(callback_id, "Order/driver topilmadi")
+        return
+    response = DriverOfferResponse.objects.filter(
+        order=order,
+        driver=driver,
+        decision=DriverOfferDecision.ACCEPT,
+    ).first()
+    if not response:
+        _safe_answer(callback_id, "Qabul javobi topilmadi")
+        return
+    if action == "decline":
+        response.approval_status = DriverOfferApproval.DECLINED
+        response.reviewed_by = username
+        response.reviewed_at = django_timezone.now()
+        response.note = "Admin rad etdi"
+        response.save(update_fields=["approval_status", "reviewed_by", "reviewed_at", "note"])
+        if driver.telegram_user_id:
+            send_chat_message(str(driver.telegram_user_id), f"Order #{order.pk} uchun so'rovingiz rad etildi.")
+        _safe_answer(callback_id, "Rad etildi")
+        return
+    if action != "approve":
+        _safe_answer(callback_id, "Review action topilmadi")
+        return
+    if not _can_driver_take_order(driver, order):
+        response.approval_status = DriverOfferApproval.DECLINED
+        response.reviewed_by = username
+        response.reviewed_at = django_timezone.now()
+        response.note = "Driver mos emas yoki band"
+        response.save(update_fields=["approval_status", "reviewed_by", "reviewed_at", "note"])
+        if driver.telegram_user_id:
+            send_chat_message(str(driver.telegram_user_id), f"Order #{order.pk} allaqachon band yoki siz mos emassiz (zanyat).")
+        _safe_answer(callback_id, "Driver band/mos emas")
+        return
+    changed = assign_order(order, driver, changed_by=username)
+    if not changed:
+        response.approval_status = DriverOfferApproval.DECLINED
+        response.reviewed_by = username
+        response.reviewed_at = django_timezone.now()
+        response.note = "Assign bajarilmadi (zanyat)"
+        response.save(update_fields=["approval_status", "reviewed_by", "reviewed_at", "note"])
+        if driver.telegram_user_id:
+            send_chat_message(str(driver.telegram_user_id), f"Order #{order.pk} band (zanyat).")
+        _safe_answer(callback_id, "Assign bajarilmadi")
+        return
+    response.approval_status = DriverOfferApproval.APPROVED
+    response.reviewed_by = username
+    response.reviewed_at = django_timezone.now()
+    response.note = "Admin tasdiqladi"
+    response.save(update_fields=["approval_status", "reviewed_by", "reviewed_at", "note"])
+    if driver.telegram_user_id:
+        send_chat_message(str(driver.telegram_user_id), f"Order #{order.pk} sizga TASDIQLANDI.")
+    _safe_answer(callback_id, "Driver tasdiqlandi")
+
+
+def _handle_ui_callback(callback_query: dict, callback_data: str) -> None:
+    callback_id = str(callback_query.get("id", ""))
+    chat_id = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
+    message_id = str(callback_query.get("message", {}).get("message_id", ""))
+    parts = callback_data.split(":")
+    if len(parts) < 2:
+        _safe_answer(callback_id, "Noto‘g‘ri amal")
+        return
+    _log_ui_or_card_callback(callback_query, action=parts[1], order=None, ok=True)
+    if parts[1] == "home":
+        _safe_edit_text(
+            chat_id,
+            message_id,
+            DISPATCHER_PANEL_TITLE,
+            reply_markup=build_dispatcher_panel_keyboard(),
+            parse_mode="HTML",
+        )
+        _safe_answer(callback_id, "Panel yangilandi")
+        return
+    if len(parts) < 3:
+        _safe_answer(callback_id, "Noto‘g‘ri amal")
+        return
+    if parts[1] == "orders":
+        status = parts[2]
+        page = parts[3] if len(parts) > 3 else "1"
+        text = _build_dispatcher_orders_text(status, page)
+        page_num = int(page) if page.isdigit() and int(page) > 0 else 1
+        _safe_edit_text(chat_id, message_id, text, reply_markup=build_pager_keyboard("orders", status, page_num))
+        _safe_answer(callback_id, "Ro‘yxat yangilandi")
+        return
+    if parts[1] == "drivers":
+        status = parts[2]
+        text = _build_dispatcher_drivers_text(status)
+        _safe_edit_text(
+            chat_id,
+            message_id,
+            text,
+            reply_markup={"inline_keyboard": [[{"text": "🏠 Bosh panel", "callback_data": "ui:home"}]]},
+        )
+        _safe_answer(callback_id, "Haydovchilar yangilandi")
+        return
+    if parts[1] == "audit":
+        mode = parts[2]
+        limit = parts[3] if len(parts) > 3 else "10"
+        text = _build_dispatcher_audit_text(mode, limit)
+        _safe_edit_text(
+            chat_id,
+            message_id,
+            text,
+            reply_markup={"inline_keyboard": [[{"text": "🏠 Bosh panel", "callback_data": "ui:home"}]]},
+        )
+        _safe_answer(callback_id, "Audit yangilandi")
+        return
+    _safe_answer(callback_id, "Amal topilmadi")
+
+
+def _apply_driver_hajm(
+    *,
+    driver: Driver,
+    order: Order,
+    chat_id: str,
+    message_id: str,
+    loaded: bool,
+    quantity: Decimal,
+    uom: str,
+    density: Decimal | None,
+) -> tuple[bool, str]:
+    """Haydovchi Telegram orqali yuklangan / topshirilgan hajmni yozadi."""
+    eff_density = density if density is not None else order.density_kg_per_liter
+    if uom == QuantityUnit.LITER and (eff_density is None or eff_density <= 0):
+        return (
+            False,
+            "Litr uchun <code>zichlik kg/L</code> kerak: masalan "
+            "<code>/topshirildi 10000 litr 0.84</code> yoki avval <code>/zichlik 0.84</code>",
+        )
+
+    ton_preview = quantity_to_metric_tonnes(quantity, uom, density_kg_per_liter=eff_density)
+    if ton_preview is None:
+        return False, "Hajmni tonnaga aylantirib bo‘lmadi."
+
+    now = django_timezone.now()
+    with transaction.atomic():
+        locked = Order.objects.select_for_update().filter(pk=order.pk).first()
+        if not locked:
+            return False, "Buyurtma topilmadi"
+        if density is not None:
+            locked.density_kg_per_liter = density
+        uf: list[str] = ["updated_at"]
+        if density is not None:
+            locked.density_kg_per_liter = density
+            uf.append("density_kg_per_liter")
+        if loaded:
+            locked.loaded_quantity = quantity
+            locked.loaded_quantity_uom = uom
+            locked.loaded_recorded_at = now
+            locked.loaded_recorded_by = f"tg:{driver.pk}"
+            uf += ["loaded_quantity", "loaded_quantity_uom", "loaded_recorded_at", "loaded_recorded_by"]
+        else:
+            locked.delivered_quantity = quantity
+            locked.delivered_quantity_uom = uom
+            locked.delivered_recorded_at = now
+            locked.delivered_recorded_by = f"tg:{driver.pk}"
+            uf += ["delivered_quantity", "delivered_quantity_uom", "delivered_recorded_at", "delivered_recorded_by"]
+        locked.save(update_fields=uf)
+
+    TelegramMessageLog.objects.create(
+        order=order,
+        chat_id=chat_id,
+        message_id=message_id,
+        event="driver_loaded_quantity" if loaded else "driver_delivered_quantity",
+        payload={
+            "driver_id": driver.pk,
+            "quantity": str(quantity),
+            "uom": uom,
+            "metric_ton": str(ton_preview),
+            "density_kg_l": str(eff_density) if eff_density is not None else None,
+        },
+    )
+    uom_disp = dict(QuantityUnit.choices).get(uom, uom)
+    kind = "Yuklangan (fakt)" if loaded else "Topshirilgan (klient)"
+    return (
+        True,
+        f"✅ <b>{kind}</b>\n#{order.pk}: <b>{quantity}</b> {uom_disp}\n"
+        f"Tonna ekvivalenti: ≈ <b>{ton_preview}</b> t",
+    )
+
+
+def _release_assigned_driver(order: Order) -> None:
+    assignment = Assignment.objects.filter(order=order).select_related("driver").first()
+    if not assignment:
+        return
+    driver = assignment.driver
+    driver.status = DriverStatus.AVAILABLE
+    driver.save(update_fields=["status", "updated_at"])
+
+
+def _handle_driver_command(message: dict) -> None:
+    user = message.get("from") or {}
+    telegram_user_id = user.get("id")
+    if not telegram_user_id:
+        return
+    chat_id = str(message.get("chat", {}).get("id", ""))
+    raw_text = normalize_driver_reply_text(str(message.get("text", "")).strip())
+    parts = raw_text.split()
+    command = parts[0] if parts else ""
+    if command == "/start":
+        _handle_driver_start(chat_id, int(telegram_user_id), parts)
+        return
+    driver = Driver.objects.filter(telegram_user_id=int(telegram_user_id)).first()
+    if not driver:
+        send_chat_message(chat_id, REGISTER_FIRST, parse_mode="HTML")
+        return
+    if command == "/help":
+        ao_help = _resolve_driver_order(driver, None)
+        if ao_help and ao_help.status == OrderStatus.IN_TRANSIT:
+            body = DRIVER_HELP_IN_TRANSIT
+        else:
+            body = DRIVER_HELP
+        send_chat_message(
+            chat_id,
+            body,
+            parse_mode="HTML",
+            reply_markup=driver_reply_keyboard_for_order(
+                ao_help, telegram_user_id=int(telegram_user_id)
+            ),
+        )
+        return
+    if command == "/trip_map":
+        target_order = _resolve_driver_order(driver, parts[1] if len(parts) > 1 and parts[1].isdigit() else None)
+        if not target_order:
+            send_chat_message(
+                chat_id,
+                "Faol buyurtma topilmadi.",
+                reply_markup=driver_idle_reply_keyboard(),
+            )
+            return
+        target_order.refresh_from_db()
+        send_chat_message(
+            chat_id,
+            build_active_trip_focus_message_html(
+                target_order, for_telegram_user_id=int(telegram_user_id)
+            ),
+            parse_mode="HTML",
+            reply_markup=driver_reply_keyboard_for_order(
+                target_order, telegram_user_id=int(telegram_user_id)
+            ),
+            disable_web_page_preview=True,
+        )
+        send_order_native_map_pins(chat_id, target_order)
+        return
+    if command == "/wizard":
+        target_order = _resolve_driver_order(driver, parts[1] if len(parts) > 1 and parts[1].isdigit() else None)
+        if not target_order:
+            send_chat_message(
+                chat_id,
+                "Faol buyurtma topilmadi.",
+                reply_markup=driver_idle_reply_keyboard(),
+            )
+            return
+        target_order.refresh_from_db()
+        trip_ip = target_order.status == OrderStatus.IN_TRANSIT
+        if trip_ip:
+            send_chat_message(
+                chat_id,
+                build_active_trip_focus_message_html(
+                    target_order, for_telegram_user_id=int(telegram_user_id)
+                )
+                + "\n\n<i>Oraliq: </i><code>/checkpoint</code> · <i>qisqa hisobot: </i><code>/trip_summary</code>",
+                parse_mode="HTML",
+                reply_markup=driver_reply_keyboard_for_order(
+                    target_order, telegram_user_id=int(telegram_user_id)
+                ),
+                disable_web_page_preview=True,
+            )
+            send_order_native_map_pins(chat_id, target_order)
+            return
+        send_chat_message(
+            chat_id,
+            _build_driver_wizard_text(
+                target_order.pk, 1, "Qadamni tanlang", target_order.get_status_display()
+            ),
+            reply_markup=build_driver_wizard_keyboard(target_order.pk, current_step=1),
+            parse_mode="HTML",
+        )
+        send_chat_message(
+            chat_id,
+            "⬇️ Pastki tugmalar — buyurtma holatiga mos.",
+            reply_markup=driver_reply_keyboard_for_order(
+                target_order, telegram_user_id=int(telegram_user_id)
+            ),
+        )
+        return
+    if command == "/zichlik":
+        zrk = driver_reply_keyboard_for_order(
+            _resolve_driver_order(driver, None), telegram_user_id=int(telegram_user_id)
+        )
+        if len(parts) < 2:
+            send_chat_message(
+                chat_id,
+                "Format: <code>/zichlik 0.84</code> — kg/L (keyingi litr kiritishlar uchun).",
+                parse_mode="HTML",
+                reply_markup=zrk,
+            )
+            return
+        try:
+            dens = Decimal(parts[1].replace(",", "."))
+            if dens <= 0:
+                raise ValueError
+        except Exception:
+            send_chat_message(
+                chat_id,
+                "Zichlik noto‘g‘ri (masalan 0.84).",
+                parse_mode="HTML",
+                reply_markup=zrk,
+            )
+            return
+        oid = parts[2] if len(parts) > 2 and parts[2].isdigit() else None
+        target_order = _resolve_driver_order(driver, oid)
+        if not target_order:
+            send_chat_message(chat_id, "Faol buyurtma topilmadi.", reply_markup=driver_idle_reply_keyboard())
+            return
+        target_order.density_kg_per_liter = dens
+        target_order.save(update_fields=["density_kg_per_liter", "updated_at"])
+        TelegramMessageLog.objects.create(
+            order=target_order,
+            chat_id=chat_id,
+            message_id=str(message.get("message_id", "")),
+            event="driver_density_set",
+            payload={"driver_id": driver.pk, "density_kg_per_liter": str(dens)},
+        )
+        target_order.refresh_from_db()
+        send_chat_message(
+            chat_id,
+            f"✅ Buyurtma #{target_order.pk}: zichlik <b>{dens}</b> kg/L saqlandi.",
+            parse_mode="HTML",
+            reply_markup=driver_reply_keyboard_for_order(
+                target_order, telegram_user_id=int(telegram_user_id)
+            ),
+        )
+        return
+    if command in ("/yuklandi", "/topshirildi"):
+        qty, uom, density, err = _parse_driver_hajm_command(parts)
+        if err:
+            send_chat_message(
+                chat_id,
+                err,
+                parse_mode="HTML",
+                reply_markup=driver_reply_keyboard_for_order(
+                    _resolve_driver_order(driver, None), telegram_user_id=int(telegram_user_id)
+                ),
+            )
+            return
+        target_order = _resolve_driver_order(driver, None)
+        if not target_order:
+            send_chat_message(
+                chat_id,
+                "Faol buyurtma topilmadi (biriktirilgan reys).",
+                reply_markup=driver_idle_reply_keyboard(),
+            )
+            return
+        ok, msg = _apply_driver_hajm(
+            driver=driver,
+            order=target_order,
+            chat_id=chat_id,
+            message_id=str(message.get("message_id", "")),
+            loaded=(command == "/yuklandi"),
+            quantity=qty,
+            uom=uom,
+            density=density,
+        )
+        target_order.refresh_from_db()
+        send_chat_message(
+            chat_id,
+            msg,
+            parse_mode="HTML" if ok else "HTML",
+            reply_markup=driver_reply_keyboard_for_order(
+                target_order, telegram_user_id=int(telegram_user_id)
+            ),
+        )
+        if ok:
+            TelegramMessageLog.objects.create(
+                order=target_order,
+                chat_id=chat_id,
+                message_id=str(message.get("message_id", "")),
+                event="driver_command",
+                payload={"command": command, "driver_id": driver.pk, "changed": True},
+            )
+        return
+    if command == "/checkpoint":
+        oid = parts[1] if len(parts) > 1 and parts[1].isdigit() else None
+        target_order = _resolve_driver_order(driver, oid)
+        if not target_order:
+            send_chat_message(
+                chat_id,
+                "Checkpoint uchun faol buyurtma topilmadi.",
+                reply_markup=driver_idle_reply_keyboard(),
+            )
+            return
+        if oid:
+            note = " ".join(parts[2:]).strip() or "Checkpoint"
+        else:
+            note = " ".join(parts[1:]).strip() or "Checkpoint"
+        TelegramMessageLog.objects.create(
+            order=target_order,
+            chat_id=chat_id,
+            message_id=str(message.get("message_id", "")),
+            event="driver_checkpoint",
+            payload={"driver_id": driver.pk, "note": note},
+        )
+        target_order.refresh_from_db()
+        send_chat_message(
+            chat_id,
+            f"✅ Checkpoint saqlandi (buyurtma #{target_order.pk}).",
+            reply_markup=driver_reply_keyboard_for_order(
+                target_order, telegram_user_id=int(telegram_user_id)
+            ),
+        )
+        return
+    if command == "/trip_summary":
+        target_order = _resolve_driver_order(driver, parts[1] if len(parts) > 1 else None)
+        if not target_order:
+            send_chat_message(
+                chat_id,
+                "Trip summary uchun buyurtma topilmadi.",
+                reply_markup=driver_idle_reply_keyboard(),
+            )
+            return
+        pings_count = LocationPing.objects.filter(order=target_order, driver=driver).count()
+        checkpoints_count = TelegramMessageLog.objects.filter(order=target_order, event="driver_checkpoint").count()
+        target_order.refresh_from_db()
+        send_chat_message(
+            chat_id,
+            f"📊 Buyurtma #{target_order.pk}\nHolat: {target_order.get_status_display()}\nCheckpoint: {checkpoints_count}\nLokatsiya: {pings_count} ta",
+            reply_markup=driver_reply_keyboard_for_order(
+                target_order, telegram_user_id=int(telegram_user_id)
+            ),
+        )
+        return
+    if command not in {"/start_trip", "/finish_trip"}:
+        send_chat_message(
+            chat_id,
+            UNKNOWN_COMMAND_DRIVER,
+            parse_mode="HTML",
+            reply_markup=driver_reply_keyboard_for_order(
+                _resolve_driver_order(driver, None), telegram_user_id=int(telegram_user_id)
+            ),
+        )
+        return
+    target_order = _resolve_driver_order(driver, parts[1] if len(parts) > 1 else None)
+    if not target_order:
+        send_chat_message(
+            chat_id,
+            "Faol buyurtma topilmadi.",
+            reply_markup=driver_idle_reply_keyboard(),
+        )
+        return
+    if command == "/start_trip":
+        changed = transition_order(target_order, OrderStatus.IN_TRANSIT, changed_by=driver.full_name)
+        if not changed:
+            send_chat_message(
+                chat_id,
+                f"❌ Safarni boshlab bo‘lmadi. Holat: {html.escape(target_order.get_status_display())}",
+                parse_mode="HTML",
+                reply_markup=driver_reply_keyboard_for_order(
+                    target_order, telegram_user_id=int(telegram_user_id)
+                ),
+            )
+            return
+        target_order.refresh_from_db()
+        send_chat_message(
+            chat_id,
+            build_start_trip_driver_message_html(
+                target_order, for_telegram_user_id=int(telegram_user_id)
+            ),
+            parse_mode="HTML",
+            reply_markup=driver_reply_keyboard_for_order(
+                target_order, telegram_user_id=int(telegram_user_id)
+            ),
+            disable_web_page_preview=True,
+        )
+        send_order_native_map_pins(chat_id, target_order)
+    else:
+        # Tugatish darhol COMPLETED bo'lmaydi. Admin tasdiqlagandan keyin yakunlanadi.
+        changed = False
+        TelegramMessageLog.objects.create(
+            order=target_order,
+            chat_id=chat_id,
+            message_id=str(message.get("message_id", "")),
+            event="driver_finish_requested",
+            payload={"driver_id": driver.pk},
+        )
+        target_order.refresh_from_db()
+        send_chat_message(
+            chat_id,
+            f"📝 <b>Tugallash so‘rovi yuborildi</b>\n"
+            f"Buyurtma #{target_order.pk} admin tasdiqlagach yakunlanadi.",
+            parse_mode="HTML",
+            reply_markup=driver_reply_keyboard_for_order(
+                target_order, telegram_user_id=int(telegram_user_id)
+            ),
+        )
+    TelegramMessageLog.objects.create(
+        order=target_order,
+        chat_id=chat_id,
+        message_id=str(message.get("message_id", "")),
+        event="driver_command",
+        payload={
+            "command": command,
+            "driver_id": driver.pk,
+            "changed": changed,
+        },
+    )
+
+
+def _handle_dispatcher_command(message: dict, signature: str = "", source_ip: str = "") -> bool:
+    """DISPATCHER_TELEGRAM_USER_IDS: veb-only admin Telegram akkauntlari — buyurtma boshqaruvi web-panelda.
+
+    Bir xil Telegram ID haydovchi profiliga ulangan bo‘lsa, haydovchi buyruqlari ishlashi uchun
+    bu yerda False qaytaramiz.
+    """
+    user = message.get("from") or {}
+    user_id = int(user.get("id", 0))
+    dispatcher_ids = set(getattr(settings, "DISPATCHER_TELEGRAM_USER_IDS", []) or [])
+    if user_id not in dispatcher_ids:
+        return False
+    if Driver.objects.filter(telegram_user_id=user_id).exists():
+        return False
+    chat_id = str(message.get("chat", {}).get("id", ""))
+    raw_text = str(message.get("text", "")).strip()
+    parts = raw_text.split()
+    command = parts[0] if parts else ""
+    send_chat_message(chat_id, BOT_DRIVER_ONLY_NOTICE, parse_mode="HTML")
+    _log_dispatcher_command(
+        user_id,
+        command,
+        None,
+        {"ok": False, "reason": "web_only"},
+        signature=signature,
+        source_ip=source_ip,
+    )
+    return True
+
+
+def _build_dispatcher_orders_text(status: str, page: str) -> str:
+    queryset = Order.objects.order_by("-created_at")
+    if status in {choice[0] for choice in OrderStatus.choices}:
+        queryset = queryset.filter(status=status)
+    page_num = int(page) if page.isdigit() and int(page) > 0 else 1
+    per_page = int(getattr(settings, "DISPATCHER_TELEGRAM_ORDERS_PER_PAGE", 10) or 10)
+    offset = (page_num - 1) * per_page
+    queryset = queryset[offset : offset + per_page]
+    if not queryset:
+        return "Buyurtmalar topilmadi."
+    lines = [f"So'nggi buyurtmalar (sahifa {page_num}):"]
+    for order in queryset:
+        lines.append(
+            f"#{order.pk} | {order.from_location} -> {order.to_location} | {order.get_status_display()}"
+        )
+    return "\n".join(lines)
+
+
+def _build_dispatcher_order_detail_message(order_id: int) -> str:
+    order = Order.objects.filter(pk=order_id).first()
+    if not order:
+        return html.escape(ORDER_NOT_FOUND)
+    assignment = Assignment.objects.select_related("driver").filter(order=order).first()
+    driver_name = html.escape(assignment.driver.full_name) if assignment else "—"
+    price_text = (
+        order.client_price
+        if order.status in {OrderStatus.ISSUE, OrderStatus.CANCELED}
+        else (order.price_final or order.price_suggested)
+    )
+    price_esc = html.escape(str(price_text))
+    cargo_esc = html.escape(str(order.cargo_type))
+    weight_esc = html.escape(str(order.weight_ton))
+    from_esc = html.escape(str(order.from_location))
+    to_esc = html.escape(str(order.to_location))
+    status_esc = html.escape(str(order.get_status_display()))
+    return (
+        f"<b>📦 Buyurtma #{order.pk}</b>\n"
+        f"📍 {from_esc} → {to_esc}\n"
+        f"📦 {cargo_esc} ({weight_esc} t)\n"
+        f"💰 <b>Narx:</b> {price_esc}\n"
+        f"📌 <b>Holat:</b> {status_esc}\n"
+        f"🚚 <b>Haydovchi:</b> {driver_name}"
+    )
+
+
+def _dispatcher_assign(order_id: int, driver_id: int, changed_by: str) -> str:
+    order = Order.objects.filter(pk=order_id).first()
+    if not order:
+        return ORDER_NOT_FOUND
+    driver = Driver.objects.filter(pk=driver_id).first()
+    if not driver:
+        return DRIVER_NOT_FOUND
+    if not _can_driver_take_order(driver, order):
+        return "Haydovchi hujjat/holat/sig‘im bo‘yicha mos emas yoki band."
+    if order.status in {OrderStatus.COMPLETED, OrderStatus.CANCELED}:
+        return "Yakunlangan yoki bekor buyurtmaga biriktirib bo‘lmaydi."
+    changed = assign_order(order, driver, changed_by=changed_by)
+    if changed:
+        return f"✅ Biriktirildi: buyurtma #{order.pk} → {driver.full_name}"
+    return "Holat o‘zgarmadi (allaqachon biriktirilgan yoki qoida to‘sqinligi)."
+
+
+def _dispatcher_unassign(order_id: int, changed_by: str) -> str:
+    with transaction.atomic():
+        order = Order.objects.select_for_update().filter(pk=order_id).first()
+        if not order:
+            return ORDER_NOT_FOUND
+        assignment = (
+            Assignment.objects.select_related("driver")
+            .select_for_update()
+            .filter(order=order)
+            .first()
+        )
+        if not assignment:
+            return "Bu buyurtmaga haydovchi biriktirilmagan."
+        driver = assignment.driver
+        assignment.delete()
+        driver.status = DriverStatus.AVAILABLE
+        driver.save(update_fields=["status", "updated_at"])
+        changed = transition_order(order, OrderStatus.ISSUE, changed_by=changed_by)
+        if changed:
+            return f"↩️ Ajratildi: buyurtma #{order.pk} ← {driver.full_name}"
+        return f"Haydovchi ajratildi, lekin holat o‘zgarmadi (#{order.pk})."
+
+
+def _build_dispatcher_drivers_text(status: str) -> str:
+    queryset = Driver.objects.order_by("full_name")
+    if status in {DriverStatus.AVAILABLE, DriverStatus.BUSY, DriverStatus.OFFLINE}:
+        queryset = queryset.filter(status=status)
+        titles = {
+            DriverStatus.AVAILABLE: "🟢 Mavjud haydovchilar (AVAILABLE):",
+            DriverStatus.BUSY: "🚛 Band haydovchilar (BUSY):",
+            DriverStatus.OFFLINE: "⚫ Oflayn haydovchilar (OFFLINE):",
+        }
+        header = titles.get(status, "Haydovchilar:")
+    else:
+        queryset = queryset.filter(status=DriverStatus.AVAILABLE)
+        header = "🟢 Bo‘sh haydovchilar (AVAILABLE):"
+    drivers = queryset[:20]
+    if not drivers:
+        return "Ro‘yxat bo‘sh."
+    lines = [header]
+    for driver in drivers:
+        capacity = "-"
+        vehicle = driver.vehicles.order_by("-updated_at").first()
+        if vehicle:
+            capacity = f"{vehicle.capacity_ton}t"
+        lines.append(f"{driver.pk} | {driver.full_name} | {capacity}")
+    return "\n".join(lines)
+
+
+def _build_dispatcher_audit_text(mode: str, limit_raw: str) -> str:
+    limit = int(limit_raw) if limit_raw.isdigit() and int(limit_raw) > 0 else 10
+    limit = min(limit, 50)
+    event = "callback" if mode == "callbacks" else "dispatcher_command"
+    logs = TelegramMessageLog.objects.filter(event=event).order_by("-created_at")[:limit]
+    if not logs:
+        return f"Audit log bo'sh. Mode: {mode}"
+    lines = [f"So'nggi auditlar ({mode}, {limit}):"]
+    for log in logs:
+        command = log.payload.get("command", log.payload.get("action", "-"))
+        order_text = f"order#{log.order_id}" if log.order_id else "order:-"
+        time_text = log.created_at.strftime("%H:%M")
+        result_text = _audit_result_text(log)
+        lines.append(f"{time_text} | {log.chat_id} | {command} | {order_text} | {result_text}")
+    return "\n".join(lines)
+
+
+def _audit_result_text(log: TelegramMessageLog) -> str:
+    payload = log.payload or {}
+    if "changed" in payload:
+        return "ok" if payload.get("changed") else "fail"
+    if payload.get("ok") is False:
+        return "fail"
+    message = str(payload.get("message", ""))
+    if any(keyword in message for keyword in ["topilmadi", "Format", "mos emas", "o'zgarmadi"]):
+        return "fail"
+    return "ok"
+
+
+def _can_driver_take_order(driver: Driver, order: Order) -> bool:
+    if driver.verification_status != DriverVerificationStatus.APPROVED:
+        return False
+    if _driver_has_expired_documents(driver):
+        return False
+    if driver.status != DriverStatus.AVAILABLE:
+        return False
+    return driver.vehicles.filter(capacity_ton__gte=order.weight_ton).exists()
+
+
+def _log_dispatcher_command(
+    user_id: int, command: str, order_id: int | None, payload: dict, signature: str = "", source_ip: str = ""
+) -> None:
+    order = Order.objects.filter(pk=order_id).first() if order_id else None
+    TelegramMessageLog.objects.create(
+        order=order,
+        chat_id=str(user_id),
+        message_id="",
+        event="dispatcher_command",
+        dedupe_key=f"dispatcher:{user_id}:{command}:{order_id or 0}:{django_timezone.now().strftime('%Y%m%d%H%M%S')}",
+        signature=signature,
+        source_ip=source_ip,
+        payload={"command": command, **payload},
+    )
+
+
+def _handle_message(message: dict, signature: str = "", source_ip: str = "") -> None:
+    user = message.get("from") or {}
+    telegram_user_id = int(user.get("id", 0) or 0)
+    if not telegram_user_id:
+        return
+    location = message.get("location")
+    if location:
+        _save_location(telegram_user_id, location, message)
+        return
+    if _handle_driver_contact_message(message):
+        return
+    if _handle_driver_onboarding_message(message):
+        return
+    if message.get("text"):
+        _handle_text_message(message, signature=signature, source_ip=source_ip)
+
+
+def _handle_text_message(message: dict, signature: str = "", source_ip: str = "") -> None:
+    if _handle_dispatcher_command(message, signature=signature, source_ip=source_ip):
+        return
+    _handle_driver_command(message)
+
+
+def _resolve_driver_order(driver: Driver, order_id: str | None) -> Order | None:
+    queryset = Assignment.objects.select_related("order").filter(
+        driver=driver,
+        order__status__in=[OrderStatus.ASSIGNED, OrderStatus.IN_TRANSIT],
+    )
+    if order_id and order_id.isdigit():
+        assignment = queryset.filter(order_id=int(order_id)).first()
+    else:
+        assignment = queryset.order_by("-assigned_at").first()
+    if not assignment:
+        return None
+    return assignment.order
+
+
+def _handle_driver_start(chat_id: str, telegram_user_id: int, parts: list[str]) -> None:
+    if len(parts) < 2:
+        send_chat_message(
+            chat_id,
+            "<b>📱 Botga ulanish</b>\n\nPastdagi tugmani bosing — telefon raqamingiz avtomatik yuboriladi.",
+            reply_markup={
+                "keyboard": [[{"text": "📱 Raqamni yuborish", "request_contact": True}]],
+                "resize_keyboard": True,
+                "one_time_keyboard": True,
+            },
+            parse_mode="HTML",
+        )
+        return
+    driver = _find_driver_by_phone(parts[1])
+    if not driver:
+        send_chat_message(chat_id, "Bu raqam bo'yicha shofyor topilmadi. Ofis (admin) ga murojaat qiling.")
+        return
+    driver.telegram_user_id = telegram_user_id
+    docs_ok = not _driver_has_expired_documents(driver)
+    should_be_available = driver.verification_status == DriverVerificationStatus.APPROVED and docs_ok
+    driver.status = DriverStatus.AVAILABLE if should_be_available else DriverStatus.OFFLINE
+    driver.save(update_fields=["telegram_user_id", "status", "updated_at"])
+    if driver.verification_status == DriverVerificationStatus.REJECTED or not docs_ok:
+        first_markup: dict = {"remove_keyboard": True}
+    else:
+        first_markup = driver_idle_reply_keyboard()
+    send_chat_message(
+        chat_id,
+        f"✅ <b>Ulandi</b>\nHaydovchi: {html.escape(driver.full_name)}",
+        reply_markup=first_markup,
+        parse_mode="HTML",
+    )
+    if driver.verification_status == DriverVerificationStatus.PENDING:
+        send_chat_message(
+            chat_id,
+            "<b>⏳ Hujjatlar tekshiruvda</b>\nAdmin tasdiqlagandan keyin sizga xabar beriladi va "
+            "buyurtmalarni <b>Qabul</b> qila olasiz.",
+            parse_mode="HTML",
+        )
+        return
+    if driver.verification_status == DriverVerificationStatus.REJECTED:
+        send_chat_message(
+            chat_id,
+            "<b>⛔ Hujjatlar rad etildi</b>\nAdmin tekshirgan sabab: "
+            f"{html.escape(driver.verification_reason or '-')}.\n\n"
+            "Qayta topshirish uchun tugmani bosing.",
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "🔄 Hujjatlarni qayta yuborish", "callback_data": "onb:reverify"}]
+                ]
+            },
+            parse_mode="HTML",
+        )
+        return
+    if not docs_ok:
+        _start_driver_onboarding(chat_id, driver)
+        return
+
+    # Approved + docs OK:
+    send_chat_message(
+        chat_id,
+        "<b>✅ Tasdiqlangansiz</b>\nEndi buyurtmalar kelganda guruhda <b>Qabul</b> qilishingiz mumkin.\n"
+        "<i>Pastdagi tugmalar:</i> yordam, tezkor menyu, reys hisoboti.",
+        parse_mode="HTML",
+    )
+    active_link = _resolve_driver_order(driver, None)
+    if active_link:
+        send_chat_message(
+            chat_id,
+            build_active_trip_focus_message_html(
+                active_link, for_telegram_user_id=telegram_user_id
+            ),
+            parse_mode="HTML",
+            reply_markup=driver_reply_keyboard_for_order(
+                active_link, telegram_user_id=telegram_user_id
+            ),
+            disable_web_page_preview=True,
+        )
+        send_order_native_map_pins(chat_id, active_link)
+
+
+def _start_driver_onboarding(chat_id: str, driver: Driver) -> None:
+    state, _ = DriverOnboardingState.objects.get_or_create(
+        telegram_user_id=int(driver.telegram_user_id or 0),
+        defaults={"driver": driver},
+    )
+    state.driver = driver
+    state.is_active = True
+    state.step = "full_name"
+    state.payload = {}
+    state.save(update_fields=["driver", "is_active", "step", "payload", "updated_at"])
+    send_chat_message(
+        chat_id,
+        _onb_first_block(
+            1,
+            "👤",
+            "Ism va familiya",
+            "Passportdagi kabi <b>to'liq</b> ism-familiyangizni yozing.",
+        ),
+        parse_mode="HTML",
+    )
+
+
+def _handle_driver_onboarding_message(message: dict) -> bool:
+    user = message.get("from") or {}
+    telegram_user_id = int(user.get("id", 0) or 0)
+    if not telegram_user_id:
+        return False
+    state = DriverOnboardingState.objects.filter(telegram_user_id=telegram_user_id, is_active=True).first()
+    if not state:
+        return False
+    chat_id = str(message.get("chat", {}).get("id", ""))
+    text = str(message.get("text", "")).strip()
+    truck_only = _onb_truck_mode(state.payload)
+
+    if state.step == "license_dates":
+        issued, expires = _parse_two_dates(text)
+        if not issued or not expires:
+            send_chat_message(
+                chat_id,
+                "Iltimos, ikkala sanani vergul bilan yuboring:\n"
+                "<code>2020-01-10,2030-01-10</code>\n"
+                "yoki <code>10.01.2020,10.01.2030</code>",
+                parse_mode="HTML",
+            )
+            return True
+        state.payload["license_issued_at"] = issued.isoformat()
+        state.payload["license_expires_at"] = expires.isoformat()
+        state.step = "license_photo"
+        state.save(update_fields=["payload", "step", "updated_at"])
+        send_chat_message(
+            chat_id,
+            _onb_first_block(5, "🪪", "Guvohnoma rasmi", _ONB_PHOTO_HINT),
+            parse_mode="HTML",
+        )
+        return True
+
+    if state.step == "full_name":
+        if not text:
+            send_chat_message(chat_id, "Ism-familiyani matn ko'rinishida yuboring.")
+            return True
+        state.payload["full_name"] = text
+        state.step = "license_number"
+        state.save(update_fields=["payload", "step", "updated_at"])
+        send_chat_message(
+            chat_id,
+            _onb_first_block(
+                2,
+                "🔢",
+                "Haydovchilik guvohnomasi raqami",
+                "Raqamni <b>qanday bo'lsa, shunday</b> yozing (probelsiz).",
+            ),
+            parse_mode="HTML",
+        )
+        return True
+    if state.step == "license_number":
+        if not text:
+            send_chat_message(chat_id, "Guvohnoma raqamini matn sifatida yuboring.")
+            return True
+        state.payload["license_number"] = text
+        state.step = "license_issued"
+        state.save(update_fields=["payload", "step", "updated_at"])
+        send_chat_message(
+            chat_id,
+            _onb_first_block(3, "📅", "Guvohnoma berilgan sana", _ONB_DATE_HINT),
+            parse_mode="HTML",
+        )
+        return True
+    if state.step == "license_issued":
+        if not text:
+            send_chat_message(chat_id, "Sanani yozing yoki ikki sanani vergul bilan yuboring.")
+            return True
+        duo = _parse_two_dates(text)
+        if duo[0] and duo[1]:
+            state.payload["license_issued_at"] = duo[0].isoformat()
+            state.payload["license_expires_at"] = duo[1].isoformat()
+            state.step = "license_photo"
+            state.save(update_fields=["payload", "step", "updated_at"])
+            send_chat_message(
+                chat_id,
+                _onb_first_block(5, "🪪", "Guvohnoma rasmi", _ONB_PHOTO_HINT),
+                parse_mode="HTML",
+            )
+            return True
+        issued = _parse_date_flexible(text)
+        if not issued:
+            send_chat_message(
+                chat_id,
+                "Sana tushunarsiz. Masalan: <code>2020-05-01</code> yoki <code>01.05.2020</code>",
+                parse_mode="HTML",
+            )
+            return True
+        state.payload["license_issued_at"] = issued.isoformat()
+        state.step = "license_expires"
+        state.save(update_fields=["payload", "step", "updated_at"])
+        send_chat_message(
+            chat_id,
+            _onb_first_block(4, "📅", "Guvohnoma tugash sanasi", _ONB_DATE_HINT),
+            parse_mode="HTML",
+        )
+        return True
+    if state.step == "license_expires":
+        if not text:
+            send_chat_message(chat_id, "Tugash sanasini yozing.")
+            return True
+        expires = _parse_date_flexible(text)
+        if not expires:
+            send_chat_message(
+                chat_id,
+                "Sana tushunarsiz. Masalan: <code>2030-05-01</code>",
+                parse_mode="HTML",
+            )
+            return True
+        issued_raw = state.payload.get("license_issued_at")
+        issued_prev = _parse_date(str(issued_raw)) if issued_raw else None
+        if issued_prev and expires <= issued_prev:
+            send_chat_message(chat_id, "Tugash sanasi berilgan sanadan keyin bo'lishi kerak.")
+            return True
+        state.payload["license_expires_at"] = expires.isoformat()
+        state.step = "license_photo"
+        state.save(update_fields=["payload", "step", "updated_at"])
+        send_chat_message(
+            chat_id,
+            _onb_first_block(5, "🪪", "Guvohnoma rasmi", _ONB_PHOTO_HINT),
+            parse_mode="HTML",
+        )
+        return True
+    if state.step == "license_photo":
+        file_id = _message_best_photo_file_id(message)
+        if not file_id:
+            send_chat_message(chat_id, "Iltimos, guvohnoma <b>rasm</b>ini yuboring.", parse_mode="HTML")
+            return True
+        state.payload["license_photo_file_id"] = file_id
+        state.step = "vehicle_plate"
+        state.save(update_fields=["payload", "step", "updated_at"])
+        if truck_only:
+            send_chat_message(
+                chat_id,
+                _onb_truck_block(
+                    1,
+                    "🔖",
+                    "Davlat raqami",
+                    "Masalan: <code>80A123BC</code> (probellarsiz, katta harf).",
+                ),
+                parse_mode="HTML",
+            )
+        else:
+            send_chat_message(
+                chat_id,
+                _onb_first_block(
+                    6,
+                    "🔖",
+                    "Texnika davlat raqami",
+                    "Masalan: <code>80A123BC</code> (probellarsiz, katta harf).",
+                ),
+                parse_mode="HTML",
+            )
+        return True
+    if state.step == "vehicle_plate":
+        if not text:
+            send_chat_message(chat_id, "Davlat raqamini yuboring.")
+            return True
+        state.payload["vehicle_plate"] = text.upper().strip()
+        state.step = "vehicle_capacity_ton"
+        state.save(update_fields=["payload", "step", "updated_at"])
+        if truck_only:
+            send_chat_message(
+                chat_id,
+                _onb_truck_block(2, "⚖️", "Texnika sig'imi (tonna)", "Masalan: <code>10</code> (probellarsiz)."),
+                parse_mode="HTML",
+            )
+        else:
+            send_chat_message(
+                chat_id,
+                _onb_first_block(7, "⚖️", "Texnika sig'imi (tonna)", "Masalan: <code>10</code> (probellarsiz)."),
+                parse_mode="HTML",
+            )
+        return True
+    if state.step == "vehicle_capacity_ton":
+        if not text:
+            send_chat_message(
+                chat_id,
+                "Texnika sig'imi (tonna)ni yuboring. Masalan: <code>10</code> yoki <code>8.50</code>",
+                parse_mode="HTML",
+            )
+            return True
+        raw = str(text).strip().replace(",", ".")
+        try:
+            cap = Decimal(raw)
+        except Exception:
+            send_chat_message(
+                chat_id,
+                "Sig'im raqami tushunarsiz. Masalan: <code>10</code> yoki <code>8.50</code>",
+                parse_mode="HTML",
+            )
+            return True
+        if cap <= 0:
+            send_chat_message(
+                chat_id,
+                "Sig'im musbat bo'lishi kerak. Masalan: <code>10</code>",
+                parse_mode="HTML",
+            )
+            return True
+        cap = cap.quantize(Decimal("0.01"))
+        state.payload["vehicle_capacity_ton"] = str(cap)
+        state.step = "vehicle_doc_number"
+        state.save(update_fields=["payload", "step", "updated_at"])
+        if truck_only:
+            send_chat_message(
+                chat_id,
+                _onb_truck_block(3, "📄", "Ro'yxatga olish hujjati raqami", "Texnika pasportidagi raqamni yozing."),
+                parse_mode="HTML",
+            )
+        else:
+            send_chat_message(
+                chat_id,
+                _onb_first_block(8, "📄", "Ro'yxatga olish hujjati raqami", "Texnika pasportidagi raqamni yozing."),
+                parse_mode="HTML",
+            )
+        return True
+    if state.step == "vehicle_doc_number":
+        if not text:
+            send_chat_message(chat_id, "Hujjat raqamini yuboring.")
+            return True
+        state.payload["vehicle_doc_number"] = text
+        state.step = "vehicle_registration_photo"
+        state.save(update_fields=["payload", "step", "updated_at"])
+        if truck_only:
+            send_chat_message(
+                chat_id,
+                _onb_truck_block(4, "🖼", "Registratsiya rasmi", _ONB_PHOTO_HINT),
+                parse_mode="HTML",
+            )
+        else:
+            send_chat_message(
+                chat_id,
+                _onb_first_block(9, "🖼", "Registratsiya rasmi", _ONB_PHOTO_HINT),
+                parse_mode="HTML",
+            )
+        return True
+    if state.step == "vehicle_registration_photo":
+        file_id = _message_best_photo_file_id(message)
+        if not file_id:
+            send_chat_message(chat_id, "Iltimos, registratsiya <b>rasm</b>ini yuboring.", parse_mode="HTML")
+            return True
+        state.payload["vehicle_registration_photo_file_id"] = file_id
+        state.step = "calibration_expiry"
+        state.save(update_fields=["payload", "step", "updated_at"])
+        if truck_only:
+            send_chat_message(
+                chat_id,
+                _onb_truck_block(5, "⏱", "Sisterna kalibrovka muddati", _ONB_DATE_HINT),
+                parse_mode="HTML",
+            )
+        else:
+            send_chat_message(
+                chat_id,
+                _onb_first_block(10, "⏱", "Sisterna kalibrovka muddati", _ONB_DATE_HINT),
+                parse_mode="HTML",
+            )
+        return True
+    if state.step == "calibration_expiry":
+        exp = _parse_date_flexible(text)
+        if not exp:
+            send_chat_message(
+                chat_id,
+                "Sana tushunarsiz. Masalan: <code>2026-12-31</code>",
+                parse_mode="HTML",
+            )
+            return True
+        state.payload["calibration_expires_at"] = exp.isoformat()
+        state.step = "tanker_document_photo"
+        state.save(update_fields=["payload", "step", "updated_at"])
+        if truck_only:
+            send_chat_message(
+                chat_id,
+                _onb_truck_block(6, "🛢", "Sisterna hujjati rasmi", _ONB_PHOTO_HINT),
+                parse_mode="HTML",
+            )
+        else:
+            send_chat_message(
+                chat_id,
+                _onb_first_block(11, "🛢", "Sisterna hujjati rasmi", _ONB_PHOTO_HINT),
+                parse_mode="HTML",
+            )
+        return True
+    if state.step == "tanker_document_photo":
+        file_id = _message_best_photo_file_id(message)
+        if not file_id:
+            send_chat_message(chat_id, "Iltimos, sisterna hujjati <b>rasm</b>ini yuboring.", parse_mode="HTML")
+            return True
+        state.payload["tanker_document_photo_file_id"] = file_id
+        _apply_onboarding_data(state)
+        state.payload["onb_truck_only"] = False
+        state.step = "add_another_truck"
+        state.save(update_fields=["payload", "step", "updated_at"])
+        send_chat_message(
+            chat_id,
+            "<b>✅ Texnika saqlandi</b>\n\nYana avtomobil qo'shasizmi?",
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "➕ Ha, yana texnika", "callback_data": "onb:add_truck"}],
+                    [{"text": "✔️ Yo'q, tugatish", "callback_data": "onb:finish"}],
+                ]
+            },
+            parse_mode="HTML",
+        )
+        return True
+    if state.step == "add_another_truck":
+        send_chat_message(
+            chat_id,
+            "Pastdagi tugmalardan birini tanlang: <b>yana texnika</b> yoki <b>tugatish</b>.",
+            parse_mode="HTML",
+        )
+        return True
+    return True
+
+
+def _handle_onboarding_callback(callback_query: dict, callback_data: str) -> None:
+    callback_id = str(callback_query.get("id", ""))
+    chat_id = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
+    user = callback_query.get("from") or {}
+    username = (user.get("username") or "").strip()
+    telegram_user_id = int(user.get("id", 0) or 0)
+    if callback_data == "onb:reverify":
+        driver = Driver.objects.filter(telegram_user_id=telegram_user_id).first()
+        if not driver:
+            _safe_answer(callback_id, "Driver topilmadi")
+            return
+        state, _ = DriverOnboardingState.objects.get_or_create(
+            telegram_user_id=telegram_user_id,
+            defaults={"driver": driver},
+        )
+        state.driver = driver
+        state.is_active = True
+        state.step = "license_number"
+        state.payload = {}
+        state.save(update_fields=["driver", "is_active", "step", "payload", "updated_at"])
+        if driver.status != DriverStatus.OFFLINE:
+            driver.status = DriverStatus.OFFLINE
+            driver.save(update_fields=["status", "updated_at"])
+        send_chat_message(
+            chat_id,
+            _onb_first_block(
+                2,
+                "🔢",
+                "Haydovchilik guvohnomasi raqami",
+                "Raqamni <b>qanday bo'lsa, shunday</b> yozing (probelsiz).",
+            ),
+            parse_mode="HTML",
+        )
+        _safe_answer(callback_id, "Qayta topshirish boshlandi")
+        return
+
+    state = DriverOnboardingState.objects.filter(telegram_user_id=telegram_user_id, is_active=True).first()
+    if not state:
+        _safe_answer(callback_id, "Onboarding topilmadi")
+        return
+    if callback_data == "onb:add_truck":
+        state.payload["onb_truck_only"] = True
+        state.payload.pop("vehicle_plate", None)
+        state.payload.pop("vehicle_capacity_ton", None)
+        state.payload.pop("vehicle_doc_number", None)
+        state.payload.pop("vehicle_registration_photo_file_id", None)
+        state.payload.pop("calibration_expires_at", None)
+        state.payload.pop("tanker_document_photo_file_id", None)
+        state.step = "vehicle_plate"
+        state.save(update_fields=["step", "payload", "updated_at"])
+        send_chat_message(
+            chat_id,
+            _onb_truck_block(
+                1,
+                "🔖",
+                "Davlat raqami",
+                "Masalan: <code>80A123BC</code> (probellarsiz).",
+            ),
+            parse_mode="HTML",
+        )
+        _safe_answer(callback_id, "Keyingi qadam")
+        return
+    if callback_data == "onb:finish":
+        # Hujjatlar to'liq yig'ildi — admin tekshirigidan o'tmaguncha yuk qabul qilinmaydi.
+        driver = state.driver
+        if driver:
+            from drivers.models import DriverVerificationAudit, DriverVerificationAuditAction
+
+            # Driver ro'yxatdan o'tishi yakunlandi — admin tekshirishi uchun "Submitted" audit.
+            DriverVerificationAudit.objects.create(
+                driver=driver,
+                action=DriverVerificationAuditAction.SUBMITTED,
+                actor_username="driver",
+                actor_id=telegram_user_id,
+                reason="",
+                from_status=driver.verification_status,
+                to_status=DriverVerificationStatus.PENDING,
+                details={
+                    "license_expires_at": driver.license_expires_at.isoformat() if driver.license_expires_at else None,
+                    "vehicles_count": driver.vehicles.count(),
+                },
+            )
+            driver.verification_status = DriverVerificationStatus.PENDING
+            driver.verification_reason = ""
+            driver.registration_submitted_at = django_timezone.now()
+            driver.verification_updated_at = django_timezone.now()
+            driver.verification_updated_by_username = username
+            # Admin tasdiqlamaguncha haydovchi offline turadi.
+            driver.status = DriverStatus.OFFLINE
+            driver.save(
+                update_fields=[
+                    "verification_status",
+                    "verification_reason",
+                    "registration_submitted_at",
+                    "verification_updated_at",
+                    "verification_updated_by_username",
+                    "status",
+                ]
+            )
+            cache.delete("ops_dashboard_v1")
+        state.is_active = False
+        state.step = "done"
+        state.save(update_fields=["is_active", "step", "updated_at"])
+        send_chat_message(
+            chat_id,
+            "<b>✅ Hujjatlaringiz saqlandi</b>\n\n"
+            "Admin ularni ko'rib chiqadi. "
+            "Tasdiqlangandan keyin sizga xabar beriladi va keyin guruhdagi buyurtmalarni <b>Qabul</b> qilishingiz mumkin.",
+            parse_mode="HTML",
+        )
+        _safe_answer(callback_id, "Tugatildi")
+        return
+    _safe_answer(callback_id, "Noma'lum amal")
+
+
+def _apply_onboarding_data(state: DriverOnboardingState) -> None:
+    driver = state.driver
+    if not driver:
+        return
+    payload = state.payload or {}
+    full_name = str(payload.get("full_name", "")).strip()
+    if full_name:
+        driver.full_name = full_name
+    driver.license_number = str(payload.get("license_number", "")).strip()
+    driver.license_issued_at = _parse_date(str(payload.get("license_issued_at", "")))
+    driver.license_expires_at = _parse_date(str(payload.get("license_expires_at", "")))
+    driver.license_photo_file_id = str(payload.get("license_photo_file_id", "")).strip()
+    driver.registration_photo_file_id = str(payload.get("vehicle_registration_photo_file_id", "")).strip()
+    driver.save(
+        update_fields=[
+            "full_name",
+            "license_number",
+            "license_issued_at",
+            "license_expires_at",
+            "license_photo_file_id",
+            "registration_photo_file_id",
+            "updated_at",
+        ]
+    )
+    plate_value = str(payload.get("vehicle_plate", "")).strip().upper() or f"TEMP-{driver.pk}-{driver.vehicles.count() + 1}"
+    existing_plate = driver.vehicles.filter(plate_number=plate_value).first()
+    if not existing_plate and Driver.objects.filter(vehicles__plate_number=plate_value).exclude(pk=driver.pk).exists():
+        plate_value = f"{plate_value}-{driver.pk}"
+    vehicle = driver.vehicles.filter(plate_number=plate_value).first()
+    cap_raw = str(payload.get("vehicle_capacity_ton", "")).strip().replace(",", ".")
+    try:
+        capacity_ton = Decimal(cap_raw) if cap_raw else Decimal("0")
+    except Exception:
+        capacity_ton = Decimal("0")
+    if capacity_ton < 0:
+        capacity_ton = Decimal("0")
+    if not vehicle:
+        vehicle = driver.vehicles.create(
+            plate_number=plate_value,
+            vehicle_type="Tanker",
+            capacity_ton=capacity_ton,
+        )
+    else:
+        vehicle.capacity_ton = capacity_ton
+    vehicle.registration_document_number = str(payload.get("vehicle_doc_number", "")).strip()
+    vehicle.registration_photo_file_id = str(payload.get("vehicle_registration_photo_file_id", "")).strip()
+    vehicle.calibration_expires_at = _parse_date(str(payload.get("calibration_expires_at", "")))
+    vehicle.tanker_document_photo_file_id = str(payload.get("tanker_document_photo_file_id", "")).strip()
+    vehicle.save(
+        update_fields=[
+            "capacity_ton",
+            "registration_document_number",
+            "registration_photo_file_id",
+            "calibration_expires_at",
+            "tanker_document_photo_file_id",
+            "updated_at",
+        ]
+    )
+
+
+def _parse_date_flexible(value: str) -> date | None:
+    v = (value or "").strip()
+    if not v:
+        return None
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(v, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_date(value: str) -> date | None:
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_two_dates(value: str) -> tuple[date | None, date | None]:
+    if "," not in value:
+        return None, None
+    left, right = value.split(",", 1)
+    return _parse_date_flexible(left), _parse_date_flexible(right)
+
+
+def _pick_photo_file_id(photo_items: list[dict]) -> str:
+    if not photo_items:
+        return ""
+    best = photo_items[-1]
+    return str(best.get("file_id", ""))
+
+
+def _message_best_photo_file_id(message: dict) -> str:
+    photos = message.get("photo") or []
+    if photos:
+        return _pick_photo_file_id(photos)
+    doc = message.get("document") or {}
+    mime = str(doc.get("mime_type", ""))
+    if mime.startswith("image/"):
+        return str(doc.get("file_id", ""))
+    return ""
+
+
+def _driver_has_expired_documents(driver: Driver) -> bool:
+    today = django_timezone.localdate()
+    # Admin tasdiqlagan bo'lishi kerak, shuning uchun bu yerda faqat "muddat o'tgan" holatlarini tekshiramiz.
+    if driver.license_expires_at and driver.license_expires_at < today:
+        return True
+    vehicles = list(driver.vehicles.all())
+    if not vehicles:
+        return True
+    for vehicle in vehicles:
+        if vehicle.calibration_expires_at and vehicle.calibration_expires_at < today:
+            return True
+    return False
+
+
+def _driver_expired_documents_issues(driver: Driver) -> list[str]:
+    """
+    Human-readable issues used both for driver message and admin AlertEvent.
+    """
+    today = django_timezone.localdate()
+    issues: list[str] = []
+
+    if driver.license_expires_at and driver.license_expires_at < today:
+        issues.append(f"Guvohnoma tugagan ({driver.license_expires_at})")
+
+    vehicles = list(driver.vehicles.all())
+    if not vehicles:
+        issues.append("Mashina(lar) yo'q")
+
+    for vehicle in vehicles:
+        if vehicle.calibration_expires_at and vehicle.calibration_expires_at < today:
+            issues.append(f"{vehicle.plate_number}: kalibrovka tugagan ({vehicle.calibration_expires_at})")
+
+    return issues
+
+
+def _normalize_phone(raw: str) -> str:
+    value = raw.strip()
+    if not value:
+        return ""
+    digits = "".join(ch for ch in value if ch.isdigit())
+    if not digits:
+        return ""
+
+    # Uzbekistan typical formats:
+    # - +9989XXXXXXXX (E.164)
+    # - 9989XXXXXXXX (without '+')
+    # - 9XXXXXXXX (national without country)
+    # - 8XXXXXXXXX (national with leading 8)
+    if digits.startswith("998"):
+        return "+" + digits
+    if len(digits) == 9:
+        if digits.startswith("9"):
+            return "+998" + digits
+        if digits.startswith("8"):
+            return "+998" + digits[1:]
+        return "+998" + digits
+    if digits.startswith("8") and len(digits) >= 10:
+        return "+998" + digits[1:]
+    return "+" + digits
+
+
+def _phone_candidates(raw: str) -> set[str]:
+    digits = "".join(ch for ch in (raw or "") if ch.isdigit())
+    if not digits:
+        return set()
+    last9 = digits[-9:]
+    normalized_e164 = _normalize_phone(raw)
+
+    candidates = {normalized_e164, digits}
+    if digits.startswith("998"):
+        candidates.add(digits)
+        candidates.add("+" + digits)
+    # Try national forms (last 9 digits)
+    if len(last9) == 9:
+        if last9.startswith("9"):
+            candidates.add("+998" + last9)
+            candidates.add("998" + last9)
+        if last9.startswith("8"):
+            candidates.add("+998" + last9[1:])
+            candidates.add("998" + last9[1:])
+        candidates.add(last9)
+    return {c for c in candidates if c}
+
+
+def _find_driver_by_phone(raw: str) -> Driver | None:
+    candidates = list(_phone_candidates(raw))
+    if not candidates:
+        return None
+    return Driver.objects.filter(phone__in=candidates).first()
+
+
+def _handle_driver_contact_message(message: dict) -> bool:
+    contact = message.get("contact") or {}
+    user = message.get("from") or {}
+    chat_id = str(message.get("chat", {}).get("id", ""))
+    telegram_user_id = int(user.get("id", 0) or 0)
+    if not contact or not telegram_user_id:
+        return False
+    contact_user_id = int(contact.get("user_id", 0) or 0)
+    if contact_user_id and contact_user_id != telegram_user_id:
+        send_chat_message(chat_id, "Faqat o'zingizning raqamingizni yuboring.")
+        return True
+    driver = _find_driver_by_phone(str(contact.get("phone_number", "")))
+    if not driver:
+        send_chat_message(chat_id, "Bu raqam bo'yicha shofyor topilmadi. Ofis (admin) ga murojaat qiling.")
+        return True
+    driver.telegram_user_id = telegram_user_id
+    docs_ok = not _driver_has_expired_documents(driver)
+    should_be_available = driver.verification_status == DriverVerificationStatus.APPROVED and docs_ok
+    driver.status = DriverStatus.AVAILABLE if should_be_available else DriverStatus.OFFLINE
+    driver.save(update_fields=["telegram_user_id", "status", "updated_at"])
+    if driver.verification_status == DriverVerificationStatus.REJECTED or not docs_ok:
+        contact_first_markup: dict = {"remove_keyboard": True}
+    else:
+        contact_first_markup = driver_idle_reply_keyboard()
+    send_chat_message(
+        chat_id,
+        f"✅ <b>Ulandi</b>\nHaydovchi: {html.escape(driver.full_name)}",
+        reply_markup=contact_first_markup,
+        parse_mode="HTML",
+    )
+    if driver.verification_status == DriverVerificationStatus.PENDING:
+        send_chat_message(
+            chat_id,
+            "<b>⏳ Hujjatlar tekshiruvda</b>\nAdmin tasdiqlagandan keyin sizga xabar beriladi.",
+            parse_mode="HTML",
+        )
+        return True
+    if driver.verification_status == DriverVerificationStatus.REJECTED:
+        send_chat_message(
+            chat_id,
+            "<b>⛔ Hujjatlar rad etildi</b>\nAdmin tekshirgan sabab: "
+            f"{html.escape(driver.verification_reason or '-')}.\n\n"
+            "Qayta topshirish uchun tugmani bosing.",
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "🔄 Hujjatlarni qayta yuborish", "callback_data": "onb:reverify"}]
+                ]
+            },
+            parse_mode="HTML",
+        )
+        return True
+    if not docs_ok:
+        _start_driver_onboarding(chat_id, driver)
+        return True
+    send_chat_message(
+        chat_id,
+        "<b>✅ Tasdiqlangansiz</b>\nEndi buyurtmalar kelganda guruhda <b>Qabul</b> qilasiz.\n"
+        "<i>Pastdagi tugmalar:</i> yordam, tezkor menyu, reys hisoboti.",
+        parse_mode="HTML",
+    )
+    active_c = _resolve_driver_order(driver, None)
+    if active_c:
+        send_chat_message(
+            chat_id,
+            build_active_trip_focus_message_html(
+                active_c, for_telegram_user_id=telegram_user_id
+            ),
+            parse_mode="HTML",
+            reply_markup=driver_reply_keyboard_for_order(
+                active_c, telegram_user_id=telegram_user_id
+            ),
+            disable_web_page_preview=True,
+        )
+        send_order_native_map_pins(chat_id, active_c)
+    return True
+
+
+def _create_critical_confirmation(action: str, order: Order, actor_id: int, payload: dict | None = None) -> str:
+    token = secrets.token_urlsafe(16)
+    CriticalActionConfirmation.objects.create(
+        token=token,
+        action=action,
+        order=order,
+        actor_id=actor_id,
+        payload=payload or {},
+        expires_at=django_timezone.now() + timedelta(minutes=10),
+    )
+    return token
+
+
+def _build_driver_wizard_text(order_id: int, step: int, message: str, status_text: str) -> str:
+    step = max(1, min(4, step))
+    return (
+        f"🚚 <b>Buyurtma #{order_id}</b>\n"
+        f"📍 Qadam: <b>{step}/4</b>\n"
+        f"📌 Holat: {html.escape(str(status_text))}\n\n"
+        f"{html.escape(str(message))}"
+    )
+
+
+def _acquire_callback_lock(user_id: int, callback_data: str, seconds: int = 3) -> bool:
+    if not user_id or not callback_data:
+        return True
+    key = f"bot:cb-lock:{user_id}:{callback_data}"
+    return cache.add(key, "1", timeout=seconds)
+
+
+def _extract_coords_text(value: str) -> tuple[float, float] | None:
+    if not value:
+        return None
+    match = re.search(r"(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)", value)
+    if not match:
+        return None
+    return float(match.group(1)), float(match.group(2))
+
+
+def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    )
+    return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _is_uzbekistan_bbox(lat: float, lon: float) -> bool:
+    return 37.0 <= lat <= 46.0 and 55.0 <= lon <= 74.0
+
+
+def _repair_order_decimals(order_id: int) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE orders_order
+            SET weight_ton = CAST(weight_ton AS REAL),
+                route_deviation_threshold_km = CAST(route_deviation_threshold_km AS REAL),
+                price_suggested = CAST(price_suggested AS REAL),
+                price_final = CAST(price_final AS REAL),
+                client_price = CAST(client_price AS REAL),
+                driver_fee = CAST(driver_fee AS REAL),
+                fuel_cost = CAST(fuel_cost AS REAL),
+                extra_cost = CAST(extra_cost AS REAL),
+                penalty_amount = CAST(penalty_amount AS REAL)
+            WHERE id = %s
+            """,
+            [order_id],
+        )
+        cursor.execute(
+            """
+            UPDATE pricing_pricequote
+            SET distance_km = CAST(distance_km AS REAL),
+                base_rate = CAST(base_rate AS REAL),
+                weight_ton = CAST(weight_ton AS REAL),
+                empty_return_km = CAST(empty_return_km AS REAL),
+                peak_coef = CAST(peak_coef AS REAL),
+                distance_cost = CAST(distance_cost AS REAL),
+                weight_cost = CAST(weight_cost AS REAL),
+                wait_cost = CAST(wait_cost AS REAL),
+                empty_return_cost = CAST(empty_return_cost AS REAL),
+                cargo_coef = CAST(cargo_coef AS REAL),
+                suggested_price = CAST(suggested_price AS REAL),
+                final_price = CAST(final_price AS REAL)
+            WHERE order_id = %s
+            """,
+            [order_id],
+        )
+
+
+def _apply_confirmation(token: str, actor_id: int, actor_name: str) -> str:
+    conf = CriticalActionConfirmation.objects.filter(token=token).select_related("order").first()
+    if not conf:
+        return "Tasdiqlash topilmadi."
+    if conf.actor_id != actor_id:
+        return "Bu tasdiqlash sizga tegishli emas."
+    if conf.used_at:
+        return "Bu tasdiqlash allaqachon ishlatilgan."
+    if conf.is_expired:
+        return "Tasdiqlash muddati tugagan."
+    order = conf.order
+    action = conf.action
+    if action == "cancel":
+        with transaction.atomic():
+            locked_order = Order.objects.select_for_update().filter(pk=order.pk).first()
+            changed = bool(locked_order) and transition_order(locked_order, OrderStatus.CANCELED, changed_by=actor_name)
+            order = locked_order or order
+        if not changed:
+            return "Cancel bajarilmadi."
+        result = f"Order #{order.pk} bekor qilindi."
+    elif action == "reprice":
+        amount_raw = str(conf.payload.get("amount", "0"))
+        try:
+            amount = float(amount_raw)
+        except ValueError:
+            return "Reprice amount xato."
+        order.price_final = amount
+        order.client_price = amount
+        order.save(update_fields=["price_final", "client_price", "updated_at"])
+        result = f"Order #{order.pk} qayta narxlandi: {amount}"
+    elif action == "refund":
+        amount_raw = str(conf.payload.get("amount", "0"))
+        result = f"Refund request qabul qilindi: order #{order.pk}, amount={amount_raw}"
+    else:
+        return "Noma'lum critical action."
+    conf.used_at = django_timezone.now()
+    conf.save(update_fields=["used_at"])
+    TelegramMessageLog.objects.create(
+        order=order,
+        chat_id=str(actor_id),
+        message_id="",
+        event="critical_confirmation_applied",
+        dedupe_key=f"critical:applied:{conf.token}",
+        payload={"action": action, "result": result},
+    )
+    return result

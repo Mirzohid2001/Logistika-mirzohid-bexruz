@@ -1,0 +1,12 @@
+<div class="card">
+  <div class="tabs">
+    <a class="tab-link {% if active_tab == 'crud' %}tab-link-active{% endif %}" href="{% url 'client-list' %}">Ro‘yxat</a>
+    <a class="tab-link {% if active_tab == 'rating' %}tab-link-active{% endif %}" href="{% url 'clients-rating-report' %}">Reyting</a>
+    <a class="tab-link {% if active_tab == 'reports' %}tab-link-active{% endif %}" href="{% url 'clients-monthly-yearly-report' %}">Report</a>
+    {% if client_360_id %}
+      <a class="tab-link {% if active_tab == '360' %}tab-link-active{% endif %}" href="{% url 'client-360-report' client_360_id %}">360</a>
+    {% else %}
+      <span class="tab-link tab-link-disabled">360</span>
+    {% endif %}
+  </div>
+</div>

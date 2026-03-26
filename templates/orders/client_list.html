@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Klientlar | Shofir{% endblock %}
+{% block content %}
+{% include "orders/client_tabs.html" with active_tab="crud" %}
+<div class="card">
+  <h1 class="title">Klientlar</h1>
+  <p class="muted" style="margin-bottom:12px">Buyurtmalar uchun yo‘nalish va SLA. Klientdan platformaga to‘lov yo‘q — kontrakt stavkalari faqat ma’lumot sifatida.</p>
+  <div class="actions">
+    <a class="btn" href="{% url 'client-create' %}">Yangi klient</a>
+    <a class="btn btn-secondary" href="{% url 'clients-rating-report' %}">Reyting</a>
+    <a class="btn btn-secondary" href="{% url 'clients-monthly-yearly-report' %}">Reportlar</a>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Nomi</th>
+          <th>Aloqa</th>
+          <th>Telefon</th>
+          <th>SLA (daq)</th>
+          <th title="Ma’lumot; buyurtmada klient narxi 0">To‘lov sharti</th>
+          <th>Holat</th>
+          <th>Amallar</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for c in clients %}
+        <tr>
+          <td>{{ c.name }}</td>
+          <td>{{ c.contact_name|default:"-" }}</td>
+          <td>{{ c.phone|default:"-" }}</td>
+          <td>{{ c.sla_minutes }}</td>
+          <td>{{ c.get_payment_terms_display }}</td>
+          <td>{% if c.is_active %}Aktiv{% else %}Arxiv{% endif %}</td>
+          <td>
+            <a class="btn btn-secondary" href="{% url 'client-edit' c.pk %}">Tahrirlash</a>
+            {% if c.is_active %}
+            <form method="post" action="{% url 'client-archive' c.pk %}" style="display:inline">{% csrf_token %}
+              <button class="btn btn-secondary" type="submit">Arxivlash</button>
+            </form>
+            {% else %}
+            <form method="post" action="{% url 'client-restore' c.pk %}" style="display:inline">{% csrf_token %}
+              <button class="btn btn-secondary" type="submit">Qayta aktiv</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="7">Klientlar yo'q.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

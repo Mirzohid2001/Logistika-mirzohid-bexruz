@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Shofyor formasi | Shofir{% endblock %}
+{% block content %}
+<div class="card">
+  <h1 class="title">{% if mode == "edit" %}Shofyorni tahrirlash{% else %}Yangi shofyor{% endif %}</h1>
+  <form method="post">
+    {% csrf_token %}
+    {% for field in form %}
+      <div class="row">
+        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {{ field }}
+        {{ field.errors }}
+      </div>
+    {% endfor %}
+    <div class="actions">
+      <button class="btn" type="submit">Saqlash</button>
+      <a class="btn btn-secondary" href="{% if driver %}{% url 'driver-detail' driver.id %}{% else %}{% url 'driver-list' %}{% endif %}">Bekor</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

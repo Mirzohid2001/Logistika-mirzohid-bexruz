@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+{% block title %}Shofyor 360 | Shofir{% endblock %}
+{% block content %}
+<div class="card">
+  <h1 class="title">{{ driver.full_name }} - 360</h1>
+  <p class="muted">To'liq analitika: trend, top yo'nalishlar, muammo sabablari, lokatsiyalar</p>
+  <div class="actions">
+    <a class="btn btn-secondary" href="{% url 'driver-edit' driver.id %}">Shofyorni tahrirlash</a>
+    <a class="btn" href="{% url 'vehicle-create' driver.id %}">Mashina qo'shish</a>
+  </div>
+</div>
+
+<div class="card">
+  <h2 class="title">Hujjatlar va tasdiqlash</h2>
+  <div class="meta-grid">
+    <div class="meta-item"><b>Tasdiqlash holati</b>
+      <span>
+        {% if driver.verification_status == "pending" %}⏳ Kutilmoqda{% endif %}
+        {% if driver.verification_status == "approved" %}✅ Tasdiqlangan{% endif %}
+        {% if driver.verification_status == "rejected" %}❌ Rad etilgan{% endif %}
+      </span>
+    </div>
+    <div class="meta-item"><b>Guvohnoma raqami</b><span>{{ driver.license_number|default:"-" }}</span></div>
+    <div class="meta-item"><b>Berilgan</b><span>{{ driver.license_issued_at|default:"-" }}</span></div>
+    <div class="meta-item"><b>Tugash</b><span>{{ driver.license_expires_at|default:"-" }}</span></div>
+    <div class="meta-item"><b>Guvohnoma rasmi</b>
+      <span>
+        {% if driver.license_photo_file_id %}
+          <a href="{% url 'driver-telegram-file' driver.license_photo_file_id %}" target="_blank">
+            <img style="max-width:120px;max-height:80px;border-radius:8px;border:1px solid #e5e7eb" src="{% url 'driver-telegram-file' driver.license_photo_file_id %}" />
+          </a>
+        {% else %}-{% endif %}
+      </span>
+    </div>
+    <div class="meta-item"><b>Ro'yxatga olish rasmi</b>
+      <span>
+        {% if driver.registration_photo_file_id %}
+          <a href="{% url 'driver-telegram-file' driver.registration_photo_file_id %}" target="_blank">
+            <img style="max-width:120px;max-height:80px;border-radius:8px;border:1px solid #e5e7eb" src="{% url 'driver-telegram-file' driver.registration_photo_file_id %}" />
+          </a>
+        {% else %}-{% endif %}
+      </span>
+    </div>
+  </div>
+  {% if driver.verification_status == "rejected" and driver.verification_reason %}
+    <p class="muted" style="margin-top:10px;"><b>Rad sababi:</b> {{ driver.verification_reason }}</p>
+  {% endif %}
+
+  {% if driver.verification_status == "pending" %}
+    <div class="actions" style="margin-top:10px;">
+      <form method="post" action="{% url 'driver-verify-approve' driver.id %}" style="display:inline">{% csrf_token %}
+        <button class="btn btn-success" type="submit">Tasdiqlash</button>
+      </form>
+      <form method="post" action="{% url 'driver-verify-reject' driver.id %}" style="display:inline">{% csrf_token %}
+        <input name="reason" class="form-control" style="width:260px; display:inline-block; vertical-align:middle; margin-right:8px;" placeholder="Rad sababi (ixtiyoriy)" />
+        <button class="btn btn-danger" type="submit">Rad etish</button>
+      </form>
+    </div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2 class="title">Audit trail</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Vaqt</th><th>Amal</th><th>Holat</th><th>Kim</th><th>Sabab</th></tr></thead>
+      <tbody>
+      {% for a in verification_audits %}
+        <tr>
+          <td>{{ a.created_at }}</td>
+          <td>{{ a.get_action_display }}</td>
+          <td>{{ a.from_status }} → {{ a.to_status }}</td>
+          <td>{{ a.actor_username|default:"-" }}</td>
+          <td>{{ a.reason|default:"-" }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="5">Audit hali yo‘q.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2 class="title">Mashinalar</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Nomer</th><th>Turi</th><th>Sig'im</th><th>Kalibrovka tugash</th><th>Hujjat</th><th>Amallar</th></tr></thead>
+      <tbody>
+      {% for vehicle in driver.vehicles.all %}
+        <tr>
+          <td>{{ vehicle.plate_number }}</td>
+          <td>{{ vehicle.vehicle_type }}</td>
+          <td>{{ vehicle.capacity_ton }}</td>
+          <td>{{ vehicle.calibration_expires_at|default:"-" }}</td>
+          <td>
+            {% if vehicle.registration_photo_file_id %}
+              <div style="margin-bottom:6px">
+                <a href="{% url 'driver-telegram-file' vehicle.registration_photo_file_id %}" target="_blank">
+                  <img style="max-width:90px;max-height:60px;border-radius:8px;border:1px solid #e5e7eb" src="{% url 'driver-telegram-file' vehicle.registration_photo_file_id %}" />
+                </a>
+              </div>
+            {% endif %}
+
+            {% if vehicle.tanker_document_photo_file_id %}
+              <a href="{% url 'driver-telegram-file' vehicle.tanker_document_photo_file_id %}" target="_blank">
+                <img style="max-width:90px;max-height:60px;border-radius:8px;border:1px solid #e5e7eb" src="{% url 'driver-telegram-file' vehicle.tanker_document_photo_file_id %}" />
+              </a>
+            {% endif %}
+
+            {% if not vehicle.registration_photo_file_id and not vehicle.tanker_document_photo_file_id %}
+              -
+            {% endif %}
+          </td>
+          <td>
+            <a class="btn btn-secondary" href="{% url 'vehicle-edit' driver.id vehicle.id %}">Tahrirlash</a>
+            <form method="post" action="{% url 'vehicle-delete' driver.id vehicle.id %}" style="display:inline">{% csrf_token %}
+              <button class="btn btn-secondary" type="submit">O'chirish</button>
+            </form>
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="6">Mashina topilmadi.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2 class="title">12 oylik trend</h2>
+  <canvas id="driverTrendChart" height="120"></canvas>
+</div>
+
+<div class="card">
+  <h2 class="title">Top yo'nalishlar</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Qayerdan</th><th>Qayerga</th><th>Soni</th></tr></thead>
+      <tbody>
+      {% for row in top_routes %}
+        <tr>
+          <td>{{ row.order__from_location }}</td>
+          <td>{{ row.order__to_location }}</td>
+          <td>{{ row.total }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="3">Ma'lumot yo'q.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2 class="title">Muammo sabablari</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Sabab (comment)</th><th>Soni</th></tr></thead>
+      <tbody>
+      {% for row in issue_reasons %}
+        <tr>
+          <td>{{ row.order__comment|default:"(bo'sh comment)" }}</td>
+          <td>{{ row.total }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="2">Muammo topilmadi.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2 class="title">Oxirgi lokatsiyalar</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Buyurtma</th><th>Koordinata</th><th>Manba</th><th>Vaqt</th></tr></thead>
+      <tbody>
+      {% for ping in recent_locations %}
+        <tr>
+          <td>#{{ ping.order_id }}</td>
+          <td>{{ ping.latitude }}, {{ ping.longitude }}</td>
+          <td>{{ ping.get_source_display }}</td>
+          <td>{{ ping.captured_at }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="4">Lokatsiya ma'lumoti yo'q.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{{ trend_json|json_script:"driver-trend-data" }}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+  const trendData = JSON.parse(document.getElementById("driver-trend-data").textContent);
+  const trendCtx = document.getElementById("driverTrendChart");
+  if (trendCtx && trendData.labels && trendData.labels.length > 0) {
+    new Chart(trendCtx, {
+      type: "line",
+      data: {
+        labels: trendData.labels,
+        datasets: [
+          { label: "Reyting", data: trendData.rating, borderWidth: 2 },
+          { label: "Yetkazib berilgan", data: trendData.deliveries, borderWidth: 2 },
+          { label: "On-time %", data: trendData.on_time, borderWidth: 2 },
+        ],
+      },
+      options: { responsive: true, plugins: { legend: { position: "bottom" } } },
+    });
+  }
+</script>
+{% endblock %}

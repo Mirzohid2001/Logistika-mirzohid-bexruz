@@ -1,0 +1,330 @@
+{% extends "base.html" %}
+{% block title %}Yangi buyurtma | Shofir{% endblock %}
+{% block content %}
+<div class="order-create-page">
+  <header class="order-create-head">
+    <div class="order-create-head-text">
+      <h1 class="order-create-title">Yangi buyurtma</h1>
+      <p class="order-create-lead muted">Asosiy maydonlarni to‘ldiring; manzillarni xarita yoki matn bilan kiritishingiz mumkin. Saqlangach buyurtma Telegram guruhga yuboriladi.</p>
+    </div>
+    <div class="order-create-head-actions">
+      <a class="btn btn-secondary" href="{% url 'order-list' %}">← Buyurtmalar</a>
+    </div>
+  </header>
+
+  <form method="post" class="order-create-form">
+    {% csrf_token %}
+    <div class="order-create-layout">
+      <div class="order-create-primary">
+
+        <section class="form-section" aria-labelledby="sec-main">
+          <h2 class="form-section-title" id="sec-main">Asosiy</h2>
+          <p class="form-section-hint muted">Klient, vaqt va yuk parametrlari</p>
+          <div class="meta-grid">
+            <div class="row row-span-2">
+              <label for="{{ form.client.id_for_label }}">{{ form.client.label }}</label>
+              {{ form.client }}{{ form.client.errors }}
+              <p id="clientPreviewBox" class="client-preview-badge" role="status">Klient tanlang — SLA shu yerda chiqadi. Moliyada faqat haydovchi va o‘z xarajatlaringiz.</p>
+            </div>
+            <div class="row">
+              <label for="{{ form.pickup_time.id_for_label }}">{{ form.pickup_time.label }}</label>
+              {{ form.pickup_time }}{{ form.pickup_time.errors }}
+            </div>
+            <div class="row">
+              <label for="{{ form.cargo_type.id_for_label }}">{{ form.cargo_type.label }}</label>
+              {{ form.cargo_type }}{{ form.cargo_type.errors }}
+            </div>
+            <div class="row">
+              <label for="{{ form.weight_ton.id_for_label }}">{{ form.weight_ton.label }}</label>
+              {{ form.weight_ton }}{{ form.weight_ton.errors }}
+            </div>
+          </div>
+        </section>
+
+        <section class="form-section" aria-labelledby="sec-route">
+          <h2 class="form-section-title" id="sec-route">Marshrut</h2>
+          <p class="form-section-hint muted">O‘ngdagi xaritadan nuqta tanlang yoki quyiga qo‘lda yozing</p>
+          <div class="meta-grid">
+            <div class="row">
+              <label for="{{ form.from_location.id_for_label }}">{{ form.from_location.label }}</label>
+              {{ form.from_location }}
+              <small class="muted">{{ form.from_location.help_text }}</small>
+              {{ form.from_location.errors }}
+            </div>
+            <div class="row">
+              <label for="{{ form.to_location.id_for_label }}">{{ form.to_location.label }}</label>
+              {{ form.to_location }}
+              <small class="muted">{{ form.to_location.help_text }}</small>
+              {{ form.to_location.errors }}
+            </div>
+            <div class="row meta-grid-full">
+              <label for="{{ form.route_deviation_threshold_km.id_for_label }}">{{ form.route_deviation_threshold_km.label }}</label>
+              {{ form.route_deviation_threshold_km }}
+              {{ form.route_deviation_threshold_km.errors }}
+            </div>
+          </div>
+        </section>
+
+        <section class="form-section" aria-labelledby="sec-contact">
+          <h2 class="form-section-title" id="sec-contact">Aloqa va izoh</h2>
+          <div class="meta-grid">
+            <div class="row">
+              <label for="{{ form.contact_name.id_for_label }}">{{ form.contact_name.label }}</label>
+              {{ form.contact_name }}{{ form.contact_name.errors }}
+            </div>
+            <div class="row">
+              <label for="{{ form.contact_phone.id_for_label }}">{{ form.contact_phone.label }}</label>
+              {{ form.contact_phone }}{{ form.contact_phone.errors }}
+            </div>
+            <div class="row meta-grid-full">
+              <label for="{{ form.comment.id_for_label }}">{{ form.comment.label }}</label>
+              {{ form.comment }}{{ form.comment.errors }}
+            </div>
+          </div>
+        </section>
+
+        <details class="form-section form-section-advanced">
+          <summary class="form-section-summary">
+            <span class="form-section-title form-section-title-inline">Geo: marshrut va geofence (JSON)</span>
+            <span class="form-section-summary-chevron" aria-hidden="true"></span>
+          </summary>
+          <p class="form-section-hint muted">Odatda xarita tugmalari avtomatik to‘ldiradi; kerak bo‘lsa qo‘lda tahrirlang.</p>
+          <div class="meta-grid">
+            <div class="row">
+              <label for="{{ form.route_polyline.id_for_label }}">{{ form.route_polyline.label }}</label>
+              {{ form.route_polyline }}
+              <small class="muted">{{ form.route_polyline.help_text }}</small>
+              {{ form.route_polyline.errors }}
+            </div>
+            <div class="row">
+              <label for="{{ form.geofence_polygon.id_for_label }}">{{ form.geofence_polygon.label }}</label>
+              {{ form.geofence_polygon }}
+              <small class="muted">{{ form.geofence_polygon.help_text }}</small>
+              {{ form.geofence_polygon.errors }}
+            </div>
+          </div>
+        </details>
+
+        <section class="form-section" aria-labelledby="sec-finance">
+          <h2 class="form-section-title" id="sec-finance">Moliya</h2>
+          <p class="form-section-hint muted" style="margin-top:0">Klientdan tushum yo‘q: faqat haydovchiga va o‘z byudjetingizdan (yoqilg‘i, qo‘shimcha, jarima).</p>
+          <div class="meta-grid">
+            <div class="row">
+              <label for="{{ form.driver_fee.id_for_label }}">{{ form.driver_fee.label }} (so‘m)</label>
+              {{ form.driver_fee }}{{ form.driver_fee.errors }}
+            </div>
+            <div class="row">
+              <label for="{{ form.fuel_cost.id_for_label }}">{{ form.fuel_cost.label }} (so‘m)</label>
+              {{ form.fuel_cost }}{{ form.fuel_cost.errors }}
+            </div>
+            <div class="row">
+              <label for="{{ form.extra_cost.id_for_label }}">{{ form.extra_cost.label }} (so‘m)</label>
+              {{ form.extra_cost }}{{ form.extra_cost.errors }}
+            </div>
+            <div class="row">
+              <label for="{{ form.penalty_amount.id_for_label }}">{{ form.penalty_amount.label }} (so‘m)</label>
+              {{ form.penalty_amount }}{{ form.penalty_amount.errors }}
+            </div>
+          </div>
+        </section>
+
+        <div class="order-create-actions actions">
+          <button class="btn" type="submit">Buyurtmani yaratish</button>
+          <a class="btn btn-secondary" href="{% url 'order-list' %}">Bekor qilish</a>
+        </div>
+      </div>
+
+      <aside class="order-create-aside" aria-label="Yandex xarita">
+        <div class="map-panel">
+          <div class="map-panel-head">
+            <h2 class="map-panel-title">Xarita</h2>
+            <p class="map-panel-desc muted">Rejimni tanlang, keyin xaritada bosing.</p>
+          </div>
+          <div class="map-toolbar" role="toolbar" aria-label="Xarita rejimi">
+            <button type="button" class="map-mode-btn is-active" id="pickFromBtn" data-mode="from" aria-pressed="true">Qayerdan</button>
+            <button type="button" class="map-mode-btn" id="pickToBtn" data-mode="to" aria-pressed="false">Qayerga</button>
+            <button type="button" class="map-mode-btn" id="addRouteBtn" data-mode="route" aria-pressed="false">Marshrut</button>
+            <button type="button" class="map-mode-btn" id="addGeofenceBtn" data-mode="geofence" aria-pressed="false">Geofence</button>
+            <button type="button" class="map-mode-btn map-mode-btn-danger" id="clearMapBtn" data-mode="clear" aria-pressed="false">Tozalash</button>
+          </div>
+          <div class="order-map-shell" id="orderMapShell">
+            <div id="orderMap" class="order-map-canvas"></div>
+          </div>
+          <div class="map-panel-footer">
+            <p id="mapModeText" class="map-mode-status"><span class="map-mode-status-label">Rejim</span> <strong>qayerdan</strong></p>
+            <button type="button" class="btn-map-expand" id="toggleMapSize" aria-expanded="false">
+              Xaritani kattalashtirish
+            </button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </form>
+</div>
+
+<script src="https://api-maps.yandex.ru/2.1/?lang=uz_UZ"></script>
+<script>
+  (function () {
+    const fromInput = document.getElementById("id_from_location");
+    const toInput = document.getElementById("id_to_location");
+    const routeInput = document.getElementById("id_route_polyline");
+    const geofenceInput = document.getElementById("id_geofence_polygon");
+    const modeText = document.getElementById("mapModeText");
+    const shell = document.getElementById("orderMapShell");
+    const toggleSizeBtn = document.getElementById("toggleMapSize");
+    const modeButtons = document.querySelectorAll(".map-mode-btn[data-mode]");
+
+    if (!fromInput || !toInput || !routeInput || !geofenceInput || !window.ymaps) return;
+
+    let mode = "from";
+    const routePoints = [];
+    const geofencePoints = [];
+    const markers = [];
+    let map = null;
+
+    const modeLabels = { from: "qayerdan", to: "qayerga", route: "marshrut nuqtasi", geofence: "geofence" };
+
+    function setMode(nextMode, label) {
+      mode = nextMode;
+      if (modeText) {
+        modeText.innerHTML = '<span class="map-mode-status-label">Rejim</span> <strong>' + label + "</strong>";
+      }
+      modeButtons.forEach(function (btn) {
+        const m = btn.getAttribute("data-mode");
+        const active = m === nextMode;
+        btn.classList.toggle("is-active", active);
+        btn.setAttribute("aria-pressed", active ? "true" : "false");
+      });
+    }
+
+    function syncJson() {
+      routeInput.value = JSON.stringify(routePoints);
+      geofenceInput.value = JSON.stringify(geofencePoints);
+    }
+
+    function clearVisuals() {
+      if (!map) return;
+      while (markers.length) {
+        map.geoObjects.remove(markers.pop());
+      }
+    }
+
+    function addMarker(coords, caption) {
+      if (!map) return;
+      const marker = new ymaps.Placemark(coords, { iconCaption: caption }, { preset: "islands#blueStretchyIcon" });
+      markers.push(marker);
+      map.geoObjects.add(marker);
+    }
+
+    function formatCoords(point) {
+      return point.lat + ", " + point.lon;
+    }
+
+    function setLocationInput(input, point) {
+      const coordsText = formatCoords(point);
+      ymaps.geocode([point.lat, point.lon], { results: 1 }).then(function (res) {
+        const geoObject = res.geoObjects.get(0);
+        if (!geoObject) {
+          input.value = coordsText;
+          return;
+        }
+        const address = geoObject.getAddressLine();
+        input.value = address ? address + " (" + coordsText + ")" : coordsText;
+      }).catch(function () {
+        input.value = coordsText;
+      });
+    }
+
+    modeButtons.forEach(function (btn) {
+      const m = btn.getAttribute("data-mode");
+      if (!m || m === "clear") return;
+      btn.addEventListener("click", function () {
+        setMode(m, modeLabels[m] || m);
+      });
+    });
+
+    document.getElementById("clearMapBtn")?.addEventListener("click", function () {
+      routePoints.length = 0;
+      geofencePoints.length = 0;
+      fromInput.value = "";
+      toInput.value = "";
+      syncJson();
+      clearVisuals();
+      setMode("from", modeLabels.from);
+    });
+
+    toggleSizeBtn?.addEventListener("click", function () {
+      const expanded = shell.classList.toggle("is-expanded");
+      toggleSizeBtn.setAttribute("aria-expanded", expanded ? "true" : "false");
+      toggleSizeBtn.textContent = expanded ? "Xaritani ixchamlashtirish" : "Xaritani kattalashtirish";
+      if (map) {
+        setTimeout(function () {
+          map.container.fitToViewport();
+        }, 320);
+      }
+    });
+
+    ymaps.ready(function () {
+      map = new ymaps.Map("orderMap", {
+        center: [41.3111, 69.2797],
+        zoom: 10,
+        controls: ["zoomControl", "fullscreenControl"],
+      });
+
+      map.events.add("click", function (e) {
+        const coords = e.get("coords");
+        const point = { lat: Number(coords[0].toFixed(6)), lon: Number(coords[1].toFixed(6)) };
+        if (mode === "from") {
+          setLocationInput(fromInput, point);
+          addMarker(coords, "A");
+        } else if (mode === "to") {
+          setLocationInput(toInput, point);
+          addMarker(coords, "B");
+        } else if (mode === "route") {
+          routePoints.push(point);
+          addMarker(coords, "R" + routePoints.length);
+        } else if (mode === "geofence") {
+          geofencePoints.push(point);
+          addMarker(coords, "G" + geofencePoints.length);
+        }
+        syncJson();
+      });
+    });
+  })();
+</script>
+
+<script>
+  (function () {
+    const previewUrl = "{% url 'client-preview' %}";
+    const clientEl = document.getElementById("id_client");
+    const hintEl = document.getElementById("clientPreviewBox");
+
+    function showHint(text) {
+      if (hintEl) hintEl.textContent = text;
+    }
+
+    async function update() {
+      if (!clientEl) return;
+      const clientId = (clientEl.value || "").toString().trim();
+      if (!clientId) {
+        showHint("Klient tanlang — SLA shu yerda chiqadi. Moliyada faqat haydovchi va o‘z xarajatlaringiz.");
+        return;
+      }
+      try {
+        const url = `${previewUrl}?client_id=${encodeURIComponent(clientId)}`;
+        const res = await fetch(url, { headers: { Accept: "application/json" } });
+        const data = await res.json();
+        if (!data || !data.ok) {
+          showHint("Klient ma’lumoti yuklanmadi.");
+          return;
+        }
+        showHint("SLA: " + data.sla_minutes + " daqiqa (klientdan tushum yo‘q — narxi 0 saqlanadi).");
+      } catch (e) {
+        showHint("Oldindan ko‘rishda xato (tarmoq).");
+      }
+    }
+
+    if (clientEl) clientEl.addEventListener("change", update);
+  })();
+</script>
+{% endblock %}

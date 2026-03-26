@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Bosh sahifa | Shofir{% endblock %}
+{% block content %}
+<div class="card">
+  <h1 class="title">Neft zavodi shofirlar platformasi</h1>
+  <p class="muted">Markaziy panel: aktiv yuklar, shofyor holati, KPI va tezkor boshqaruv. Moliyada klientdan tushum yo‘q — faqat haydovchi va ichki xarajatlar.</p>
+  <div class="actions">
+    <a class="btn" href="{% url 'order-create' %}">Yangi buyurtma</a>
+    <a class="btn btn-secondary" href="{% url 'order-list' %}">Buyurtmalar ro‘yxati</a>
+    <a class="btn btn-secondary" href="{% url 'ops-dashboard' %}">To‘liq operatsion panel</a>
+  </div>
+</div>
+
+<div class="card">
+  <h2 class="title">Tezkor modullar</h2>
+  <div class="quick-grid">
+    <a class="quick-tile" href="{% url 'client-list' %}">
+      <b>Klientlar moduli</b>
+      <span>Ro‘yxat, reyting, SLA, hisobotlar, 360°</span>
+    </a>
+    <a class="quick-tile" href="{% url 'driver-list' %}">
+      <b>Shofyorlar moduli</b>
+      <span>Ro‘yxat, analitika, haydovchi to‘lovlari, lokatsiya, 360°</span>
+    </a>
+    <a class="quick-tile" href="{% url 'ops-dashboard' %}">
+      <b>Operatsion panel</b>
+      <span>Xarita, ogohlantirishlar, KPI, trendlar</span>
+    </a>
+    <a class="quick-tile" href="{% url 'order-list' %}">
+      <b>Buyurtmalar moduli</b>
+      <span>Hayot sikli, qaytish reysi, yukni bo‘lish</span>
+    </a>
+  </div>
+</div>
+
+<div class="stats-grid">
+  <div class="card stat-card">
+    <p class="stat-label">Aktiv yuklar</p>
+    <p class="stat-value">{{ active_orders_count }}</p>
+  </div>
+  <div class="card stat-card">
+    <p class="stat-label">Bugun bajarilgan</p>
+    <p class="stat-value">{{ completed_today_count }}</p>
+  </div>
+  <div class="card stat-card">
+    <p class="stat-label">Bo‘sh shofyorlar</p>
+    <p class="stat-value">{{ drivers_available_count }}</p>
+  </div>
+  <div class="card stat-card">
+    <p class="stat-label">Band shofyorlar</p>
+    <p class="stat-value">{{ drivers_busy_count }}</p>
+  </div>
+  <div class="card stat-card" {% if pending_driver_verifications_count %}style="border-left:4px solid #c0392b"{% endif %}>
+    <p class="stat-label">Tasdiq kutilmoqda (bot)</p>
+    <p class="stat-value">{{ pending_driver_verifications_count }}</p>
+    {% if pending_driver_verifications_count %}
+      <p class="muted" style="margin-top:8px"><a href="{% url 'ops-dashboard' %}">Operatsion panel → tasdiqlar</a></p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <h2 class="title">Joriy oy KPI</h2>
+  {% if month_report %}
+    <div class="meta-grid">
+      <div class="meta-item" title="client_price yig‘indisi; klientdan tushum emas, odatda 0"><b>Klient maydoni (tushum emas)</b><span>{{ month_report.gross_revenue }}</span></div>
+      <div class="meta-item"><b>Shofyor xarajati</b><span>{{ month_report.total_driver_cost }}</span></div>
+      <div class="meta-item"><b>Yoqilg‘i</b><span>{{ month_report.total_fuel_cost }}</span></div>
+      <div class="meta-item"><b>Qo‘shimcha xarajat</b><span>{{ month_report.total_extra_cost }}</span></div>
+      <div class="meta-item"><b>Jarima (buyurtma)</b><span>{{ month_report.total_penalty }}</span></div>
+      <div class="meta-item"><b>Sof foyda</b><span>{{ month_report.net_margin|default:month_report.total_margin }}</span></div>
+      <div class="meta-item"><b>On-time</b><span>{{ month_report.on_time_rate }}%</span></div>
+    </div>
+    <p class="muted" style="margin-top:10px"><a href="{% url 'accounting-pnl-report' %}">Batafsil P&amp;L (oy / 6 oy / yil)</a></p>
+  {% else %}
+    <p class="muted">Joriy oy report hali generatsiya qilinmagan.</p>
+    <div class="actions">
+      <a class="btn" href="{% url 'generate-monthly-report' %}">Oyni hisoblash</a>
+    </div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2 class="title">Oxirgi buyurtmalar</h2>
+  {% if safe_mode %}
+    <p class="muted">Xavfsiz rejim faol: ayrim legacy raqam qiymatlari normallashtirildi.</p>
+  {% endif %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>№</th>
+          <th>Klient</th>
+          <th>Yo‘nalish</th>
+          <th>Holat</th>
+          <th title="Tushum emas">Klient maydoni</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for order in latest_orders %}
+          <tr>
+            <td>#{{ order.pk }}</td>
+            <td>{% if safe_mode %}{{ order.client_name }}{% else %}{{ order.client|default:"-" }}{% endif %}</td>
+            <td>{{ order.from_location }} -> {{ order.to_location }}</td>
+            <td><span class="status-pill">{% if safe_mode %}{{ order.status_display }}{% else %}{{ order.get_status_display }}{% endif %}</span></td>
+            <td>{{ order.client_price }}</td>
+            <td><a class="btn btn-secondary" href="{% url 'order-detail' order.pk %}">Ko‘rish</a></td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="6">Buyurtma ma'lumoti yo‘q.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

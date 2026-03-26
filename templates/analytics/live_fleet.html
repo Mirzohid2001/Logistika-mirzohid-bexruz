@@ -1,0 +1,318 @@
+{% extends "base.html" %}
+{% block title %}Live flot xaritasi | Shofir{% endblock %}
+{% block content %}
+<div class="card">
+  <h1 class="title">Live flot — yo‘ldagi haydovchilar</h1>
+  <p class="muted">
+    Haydovchi Telegramda <b>Share Live Location</b> yoki «GPS (bir marta)» yuborsa, shu yerda <b>iz chizig‘i</b> va so‘nggi nuqta yangilanadi (taxminan taksi kuzatuvi).
+    {% if missing_count %}
+      <span class="custody-risk" style="font-weight:600">{{ missing_count }} ta reysda hali lokatsiya yo‘q.</span>
+    {% endif %}
+  </p>
+  <p class="muted" style="margin-top:6px">
+    <a href="{% url 'order-list' %}?status=in_transit">Yo‘lda buyurtmalar</a> ·
+    <a href="{% url 'ops-dashboard' %}">Operatsion panel</a>
+  </p>
+  <div class="meta-grid" style="margin-top:10px">
+    <div class="meta-item"><b>Jami aktiv reys</b><span>{{ fleet_counts.total_orders|default:0 }}</span></div>
+    <div class="meta-item"><b>Live bor</b><span>{{ fleet_counts.with_live|default:0 }}</span></div>
+    <div class="meta-item"><b>Live yo‘q</b><span>{{ fleet_counts.without_live|default:0 }}</span></div>
+    <div class="meta-item"><b>Eskirgan live (10+ min)</b><span>{{ fleet_counts.stale_live|default:0 }}</span></div>
+  </div>
+</div>
+
+<div class="card fleet-map-card">
+  <div class="fleet-map-toolbar">
+    <label class="fleet-map-toggle">
+      <input type="checkbox" id="fleetAutoFit" />
+      Har yangilanishda xarita chegarasini moslashtirish
+    </label>
+    <button type="button" class="btn btn-secondary btn-sm" id="fleetFitBtn">Barcha reyslarni ko‘rsatish</button>
+    <span class="fleet-map-legend muted">
+      <span class="fleet-dot fleet-dot--transit"></span> Yo‘lda
+      <span class="fleet-dot fleet-dot--assigned"></span> Biriktirilgan
+    </span>
+  </div>
+  <div id="fleetLiveMap" class="fleet-live-map"></div>
+  <p class="muted" style="margin-top:10px" id="fleet-updated">Yangilanmoqda…</p>
+</div>
+
+<div class="card">
+  <h2 class="title">Yo‘lda haydovchilar (live bor)</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Buyurtma</th><th>Haydovchi</th><th>Holat</th><th>Yo‘nalish</th><th>Lokatsiya</th></tr></thead>
+      <tbody id="fleet-live-table-body">
+        {% for m in fleet_markers %}
+          <tr>
+            <td>#{{ m.order_id }}</td>
+            <td>{{ m.driver|default:"-" }}</td>
+            <td>{% if m.is_stale %}Eskirgan{% else %}Aktiv{% endif %}</td>
+            <td>{{ m.from_location|default:"-" }} → {{ m.to_location|default:"-" }}</td>
+            <td>{{ m.lat }}, {{ m.lon }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5">Live lokatsiya kelmagan.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2 class="title">Live yoqilmagan reyslar</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Buyurtma</th><th>Holat</th><th>Yo‘nalish</th><th>Harakat</th></tr></thead>
+      <tbody id="fleet-missing-table-body">
+        {% for m in missing_live %}
+          <tr>
+            <td>#{{ m.order_id }}</td>
+            <td>{{ m.status }}</td>
+            <td>{{ m.from_short }} → {{ m.to_short }}</td>
+            <td><a class="btn btn-secondary" href="/orders/{{ m.order_id }}/">Orderni ochish</a></td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="4">Barchasida live yoqilgan.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+{{ fleet_markers|json_script:"fleet-markers-initial" }}
+
+<style>
+  .fleet-map-card { padding-top: 14px; }
+  .fleet-map-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px 16px;
+    margin-bottom: 12px;
+  }
+  .fleet-map-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.84rem;
+    color: var(--text-secondary, #475569);
+    cursor: pointer;
+    margin: 0;
+  }
+  .fleet-live-map {
+    height: min(78vh, 720px);
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid var(--line, #e2e8f0);
+    background: #e2e8f0;
+  }
+  .fleet-map-legend { display: inline-flex; align-items: center; gap: 10px; font-size: 0.8rem; }
+  .fleet-dot {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid #fff;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.15);
+  }
+  .fleet-dot--transit { background: #1d4ed8; }
+  .fleet-dot--assigned { background: #ca8a04; }
+</style>
+
+<script>
+  const dataUrl = "{% url 'live-fleet-data' %}";
+  const initial = JSON.parse(document.getElementById("fleet-markers-initial").textContent || "[]");
+  const mapNode = document.getElementById("fleetLiveMap");
+  const updatedEl = document.getElementById("fleet-updated");
+  const autoFitEl = document.getElementById("fleetAutoFit");
+  const fitBtn = document.getElementById("fleetFitBtn");
+
+  const map = L.map(mapNode, { zoomControl: true }).setView([41.31, 69.24], 7);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { maxZoom: 20, attribution: '&copy; OSM &copy; CARTO', subdomains: 'abcd' }).addTo(map);
+
+  const layers = {};
+  let didInitialFit = false;
+
+  function lineColor(status) {
+    return status === "in_transit" ? "#1d4ed8" : "#ca8a04";
+  }
+
+  function markerColor(m) {
+    if (m && m.is_stale) return "#b45309";
+    return lineColor(m.status);
+  }
+
+  function ageText(iso) {
+    if (!iso) return "-";
+    const t = new Date(iso).getTime();
+    if (!t) return iso;
+    const sec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (sec < 60) return sec + "s avval";
+    if (sec < 3600) return Math.floor(sec / 60) + "m avval";
+    return Math.floor(sec / 3600) + "h avval";
+  }
+
+  function popupHtml(m) {
+    const link = "/orders/" + m.order_id + "/";
+    return (
+      "<b>#" + m.order_id + "</b> " + (m.status_label || "") +
+      "<br/>" + (m.driver || "Haydovchi") +
+      "<br/><small>Yangilanish: " + ageText(m.captured_at) + "</small>" +
+      "<br/><small>" + ((m.from_location || "-") + " → " + (m.to_location || "-")) + "</small>" +
+      "<br/><a href='" + link + "'>Buyurtma — batafsil xarita</a>"
+    );
+  }
+
+  function fitAll(markers) {
+    const bounds = [];
+    (markers || []).forEach((m) => {
+      if (Array.isArray(m.trail) && m.trail.length) {
+        m.trail.forEach((p) => bounds.push([p.lat, p.lon]));
+      } else {
+        bounds.push([m.lat, m.lon]);
+      }
+    });
+    if (bounds.length === 0) return;
+    if (bounds.length === 1) map.setView(bounds[0], 12);
+    else map.fitBounds(bounds, { padding: [48, 48], maxZoom: 14, animate: true });
+  }
+
+  function renderOrUpdate(markers) {
+    const ids = new Set((markers || []).map((m) => m.order_id));
+
+    Object.keys(layers).forEach((k) => {
+      const id = parseInt(k, 10);
+      if (!ids.has(id)) {
+        const Lobj = layers[id];
+        if (Lobj.polyline) map.removeLayer(Lobj.polyline);
+        if (Lobj.marker) map.removeLayer(Lobj.marker);
+        delete layers[id];
+      }
+    });
+
+    (markers || []).forEach((m) => {
+      const color = markerColor(m);
+      const latlng = [m.lat, m.lon];
+      const trail = Array.isArray(m.trail) && m.trail.length >= 2
+        ? m.trail.map((p) => [p.lat, p.lon])
+        : [latlng];
+
+      if (!layers[m.order_id]) {
+        const poly = L.polyline(trail, {
+          color: color,
+          weight: 5,
+          opacity: 0.72,
+          lineJoin: "round",
+          lineCap: "round",
+        }).addTo(map);
+        const mk = L.circleMarker(latlng, {
+          radius: 12,
+          color: "#fff",
+          fillColor: color,
+          fillOpacity: 1,
+          weight: 3,
+        }).addTo(map);
+        mk.bindPopup(popupHtml(m));
+        layers[m.order_id] = { marker: mk, polyline: poly };
+      } else {
+        const { marker, polyline } = layers[m.order_id];
+        polyline.setLatLngs(trail);
+        polyline.setStyle({ color: color });
+        marker.setLatLng(latlng);
+        marker.setStyle({ fillColor: color, color: "#fff" });
+        marker.setPopupContent(popupHtml(m));
+      }
+    });
+
+    if (!didInitialFit && markers && markers.length) {
+      fitAll(markers);
+      didInitialFit = true;
+    }
+    if (autoFitEl && autoFitEl.checked && markers && markers.length) {
+      fitAll(markers);
+    }
+  }
+
+  function renderTables(markers, missing) {
+    const liveBody = document.getElementById("fleet-live-table-body");
+    const missBody = document.getElementById("fleet-missing-table-body");
+    if (liveBody) {
+      if (!markers || markers.length === 0) {
+        liveBody.innerHTML = "<tr><td colspan='5'>Live lokatsiya kelmagan.</td></tr>";
+      } else {
+        liveBody.innerHTML = markers.map((m) => (
+          "<tr>" +
+          "<td>#"+ m.order_id +"</td>" +
+          "<td>"+ (m.driver || "-") +"</td>" +
+          "<td>"+ (m.is_stale ? "Eskirgan" : "Aktiv") +"</td>" +
+          "<td>"+ ((m.from_location || "-") + " → " + (m.to_location || "-")) +"</td>" +
+          "<td>"+ m.lat +", "+ m.lon +" ("+ ageText(m.captured_at) +")</td>" +
+          "</tr>"
+        )).join("");
+      }
+    }
+    if (missBody) {
+      if (!missing || missing.length === 0) {
+        missBody.innerHTML = "<tr><td colspan='4'>Barchasida live yoqilgan.</td></tr>";
+      } else {
+        missBody.innerHTML = missing.map((m) => (
+          "<tr>" +
+          "<td>#"+ m.order_id +"</td>" +
+          "<td>"+ (m.status || "-") +"</td>" +
+          "<td>"+ ((m.from_short || "-") + " → " + (m.to_short || "-")) +"</td>" +
+          "<td><a class='btn btn-secondary' href='/orders/" + m.order_id + "/'>Orderni ochish</a></td>" +
+          "</tr>"
+        )).join("");
+      }
+    }
+  }
+
+  renderOrUpdate(initial);
+  renderTables(initial, []);
+  setTimeout(function () { map.invalidateSize(); }, 200);
+
+  fitBtn.addEventListener("click", function () {
+    fetch(dataUrl, { headers: { Accept: "application/json" } })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data && data.ok && data.markers) fitAll(data.markers);
+      })
+      .catch(function () {});
+  });
+
+  async function poll() {
+    if (document.visibilityState === "hidden") return;
+    try {
+      const res = await fetch(dataUrl, { headers: { Accept: "application/json" } });
+      const data = await res.json();
+      if (data && data.ok) {
+        renderOrUpdate(data.markers);
+        renderTables(data.markers || [], data.missing_live || []);
+        const miss = (data.missing_live || []).length;
+        const stale = (data.markers || []).filter((x) => x.is_stale).length;
+        updatedEl.textContent =
+          "Oxirgi yangilanish: " +
+          (data.server_time || "") +
+          " · Live yo‘q: " + miss + " ta reys" +
+          (stale ? " · Eskirgan: " + stale : "");
+      }
+    } catch (e) {
+      updatedEl.textContent = "Tarmoq xatosi — keyinroq qayta uriniladi.";
+    }
+  }
+
+  const pollMs = 3000;
+  setInterval(poll, pollMs);
+  poll();
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") {
+      map.invalidateSize();
+      poll();
+    }
+  });
+</script>
+{% endblock %}

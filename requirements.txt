@@ -1,0 +1,9 @@
+django
+djangorestframework
+celery
+redis
+python-telegram-bot
+django-environ
+psycopg[binary]
+reportlab
+openpyxl

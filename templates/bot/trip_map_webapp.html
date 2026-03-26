@@ -1,0 +1,782 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Reys #{{ order.pk }}</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="{% static 'bot/leaflet/leaflet.css' %}"/>
+  <script src="{% static 'bot/leaflet/leaflet.js' %}"></script>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: #0d0d0f;
+      color: #f2f2f2;
+    }
+    body.webapp-pad {
+      padding-bottom: env(safe-area-inset-bottom, 0);
+    }
+    #map {
+      position: fixed;
+      inset: 0;
+      z-index: 1;
+      background: #121214;
+    }
+    .leaflet-container {
+      font-family: inherit;
+      background: #121214;
+    }
+    /* Yandex-style top instruction */
+    .nav-card {
+      position: fixed;
+      top: calc(12px + env(safe-area-inset-top, 0));
+      left: 12px;
+      right: 12px;
+      z-index: 1000;
+      background: linear-gradient(135deg, #1c69d4 0%, #1856b3 100%);
+      color: #fff;
+      border-radius: 14px;
+      padding: 14px 16px;
+      box-shadow: 0 8px 28px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.08);
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .nav-card__icon {
+      flex: 0 0 44px;
+      height: 44px;
+      border-radius: 12px;
+      background: rgba(255,255,255,.18);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+    }
+    .nav-card__main { flex: 1; min-width: 0; }
+    .nav-card__dist {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -.02em;
+    }
+    .nav-card__street {
+      font-size: 14px;
+      opacity: .92;
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .nav-card__order {
+      font-size: 11px;
+      opacity: .75;
+      margin-top: 6px;
+    }
+    /* Bottom trip bar */
+    .trip-dock {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      z-index: 1000;
+      background: rgba(14, 14, 16, .94);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-top: 1px solid rgba(255,255,255,.08);
+      padding: 12px 16px calc(14px + env(safe-area-inset-bottom, 0));
+    }
+    .trip-dock__stats {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 12px;
+    }
+    .stat { text-align: center; flex: 1; }
+    .stat--wide { flex: 1.4; text-align: left; }
+    .stat__val { font-size: 17px; font-weight: 650; color: #fff; }
+    .stat__lab { font-size: 11px; color: #8e8e93; margin-top: 2px; text-transform: uppercase; letter-spacing: .04em; }
+    .trip-dock__note {
+      margin-top: 10px;
+      font-size: 11px;
+      line-height: 1.35;
+      color: #6d6d70;
+    }
+    .trip-dock__bar {
+      margin-top: 10px;
+      height: 4px;
+      border-radius: 2px;
+      background: rgba(255,255,255,.1);
+      overflow: hidden;
+    }
+    .trip-dock__bar > i {
+      display: block;
+      height: 100%;
+      width: 100%;
+      border-radius: 2px;
+      background: linear-gradient(90deg, #22c55e 0%, #84cc16 40%, #eab308 70%, #ef4444 100%);
+      opacity: .55;
+    }
+    /* Zoom FABs */
+    .map-fab-stack {
+      position: fixed;
+      right: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .map-fab {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      border: none;
+      background: rgba(30, 30, 34, .92);
+      color: #fff;
+      font-size: 20px;
+      line-height: 1;
+      box-shadow: 0 4px 16px rgba(0,0,0,.4);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .map-fab:active { transform: scale(.96); }
+    .ketdik-wrap {
+      margin-top: 12px;
+    }
+    .nav-open-btn {
+      width: 100%;
+      margin-top: 8px;
+      padding: 12px 14px;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 600;
+      background: rgba(17, 24, 39, .85);
+      color: #e5e7eb;
+      cursor: pointer;
+    }
+    .ketdik-btn {
+      width: 100%;
+      padding: 14px 16px;
+      border: none;
+      border-radius: 12px;
+      font-size: 17px;
+      font-weight: 700;
+      background: linear-gradient(135deg, #22c55e 0%, #15803d 100%);
+      color: #fff;
+      cursor: pointer;
+      box-shadow: 0 4px 18px rgba(34, 197, 94, 0.35);
+    }
+    .ketdik-btn:disabled {
+      opacity: 0.65;
+      cursor: default;
+    }
+    .trip-state-badge {
+      width: 100%;
+      margin-top: 8px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, #15803d 0%, #22c55e 100%);
+      color: #f0fdf4;
+      text-align: center;
+      font-size: 24px;
+      font-weight: 750;
+      letter-spacing: -.01em;
+      box-shadow: 0 6px 18px rgba(34, 197, 94, .28);
+    }
+    .ketdik-hint {
+      margin: 8px 0 0;
+      font-size: 12px;
+      line-height: 1.35;
+      color: #9ca3af;
+      text-align: center;
+    }
+    .err-panel {
+      min-height: 100%;
+      padding: 72px 20px 24px;
+      background: #0d0d0f;
+      color: #c7c7cc;
+    }
+    .err-panel code { color: #7dd3fc; }
+  </style>
+</head>
+<body class="webapp-pad">
+{% if error %}
+  <div class="err-panel">
+    <h2 style="margin:0 0 8px;font-size:18px;color:#fff;">Reys #{{ order.pk }}</h2>
+    <p>{{ error }}</p>
+    <p>Admin bilan bog‘laning yoki buyurtmada <code>lat, lon</code> kiriting.</p>
+  </div>
+{% else %}
+  {{ route_meta|json_script:"trip-route-meta" }}
+  {{ trip_viewport|json_script:"trip-viewport" }}
+  {{ show_ketdik|json_script:"trip-show-ketdik" }}
+  {% if show_ketdik and ketdik_url %}
+  {{ ketdik_url|json_script:"trip-ketdik-url" }}
+  {% endif %}
+  {% if live_ping_url %}
+  {{ live_ping_url|json_script:"trip-live-ping-url" }}
+  {% endif %}
+  {% if route_geometry %}
+  {{ route_geometry|json_script:"trip-route-geom" }}
+  {% else %}
+  <script id="trip-route-geom" type="application/json">null</script>
+  {% endif %}
+  <div class="nav-card" id="navCard">
+    <div class="nav-card__icon" id="navIcon" aria-hidden="true">➡️</div>
+    <div class="nav-card__main">
+      <div class="nav-card__dist" id="navDist">—</div>
+      <div class="nav-card__street" id="navStreet">Marshrut yuklanmoqda…</div>
+      <div class="nav-card__order">Buyurtma #{{ order.pk }} · Telegram ichida xarita</div>
+    </div>
+  </div>
+  <div id="map"></div>
+  <div class="map-fab-stack" aria-label="Xarita masshtab">
+    <button type="button" class="map-fab" id="zoomIn" title="Yaqinlashtirish">+</button>
+    <button type="button" class="map-fab" id="zoomOut" title="Uzoqlashtirish">−</button>
+  </div>
+  <div class="trip-dock">
+    <div class="trip-dock__stats">
+      <div class="stat stat--wide">
+        <div class="stat__val" id="statDist">—</div>
+        <div class="stat__lab">Masofa</div>
+      </div>
+      <div class="stat">
+        <div class="stat__val" id="statEta">—</div>
+        <div class="stat__lab">Yetib borish</div>
+      </div>
+      <div class="stat">
+        <div class="stat__val" id="statDur">—</div>
+        <div class="stat__lab">Yo‘lda</div>
+      </div>
+    </div>
+    <div class="trip-dock__bar" id="trafficBar" title="Namuna: tirbandlik qatlami (haqiqiy Yandex emas)"><i></i></div>
+    {% if show_ketdik and ketdik_url %}
+    <div class="ketdik-wrap">
+      <button type="button" class="ketdik-btn" id="ketdikBtn">Ketdik</button>
+      <div class="trip-state-badge" id="tripStateBadge" style="display:none">Yo‘ldasiz</div>
+      <button type="button" class="nav-open-btn" id="openYandexNavBtn">🧭 Yandex navigatsiyani ochish</button>
+      <p class="ketdik-hint" id="ketdikHint">Yo‘lga chiqishni tasdiqlang — admin panelda ko‘rinadi, jonli GPS xaritada ko‘rsatiladi.</p>
+    </div>
+    {% endif %}
+    <p class="trip-dock__note">
+      Bu ekran Yandex Navigatsiya o‘rnini bosmaydi: marshrut ochiq OSRM orqali; tirbandlik va 3D yo‘l-yo‘riq alohida API kerak.
+      Qizil nuqta — yuk olish, yashil — tushirish.
+    </p>
+  </div>
+  <script>
+    (function () {
+      if (window.Telegram && window.Telegram.WebApp) {
+        var tg = window.Telegram.WebApp;
+        tg.ready();
+        tg.expand();
+        if (tg.setHeaderColor) tg.setHeaderColor('#0d0d0f');
+        if (tg.setBackgroundColor) tg.setBackgroundColor('#0d0d0f');
+      }
+    })();
+
+    var fromLat = 0;
+    var fromLon = 0;
+    var toLat = 0;
+    var toLon = 0;
+    try {
+      var vpEl = document.getElementById('trip-viewport');
+      if (vpEl && vpEl.textContent) {
+        var vp = JSON.parse(vpEl.textContent);
+        fromLat = Number(vp.from_lat);
+        fromLon = Number(vp.from_lon);
+        toLat = Number(vp.to_lat);
+        toLon = Number(vp.to_lon);
+      }
+    } catch (e) {}
+
+    var showKetdik = false;
+    try {
+      var skEl = document.getElementById('trip-show-ketdik');
+      if (skEl && skEl.textContent) {
+        showKetdik = JSON.parse(skEl.textContent) === true;
+      }
+    } catch (e) {}
+    var ketdikUrl = '';
+    try {
+      var kuEl = document.getElementById('trip-ketdik-url');
+      if (kuEl && kuEl.textContent) {
+        ketdikUrl = JSON.parse(kuEl.textContent);
+      }
+    } catch (e) {}
+    var livePingUrl = '';
+    try {
+      var lpEl = document.getElementById('trip-live-ping-url');
+      if (lpEl && lpEl.textContent) {
+        livePingUrl = JSON.parse(lpEl.textContent);
+      }
+    } catch (e) {}
+
+    var routeMeta = {};
+    try {
+      var metaEl = document.getElementById('trip-route-meta');
+      if (metaEl && metaEl.textContent) {
+        routeMeta = JSON.parse(metaEl.textContent);
+      }
+    } catch (e) {
+      routeMeta = { distance_m: 0, duration_s: 0, steps: [] };
+    }
+
+    var routeGeom = null;
+    try {
+      var geomEl = document.getElementById('trip-route-geom');
+      if (geomEl && geomEl.textContent) {
+        routeGeom = JSON.parse(geomEl.textContent);
+      }
+    } catch (e) {
+      routeGeom = null;
+    }
+
+    function formatDistanceM(m) {
+      if (m < 1000) return Math.round(m) + ' m';
+      if (m < 3000) return (m / 1000).toFixed(2) + ' km';
+      if (m < 10000) return (m / 1000).toFixed(1) + ' km';
+      return Math.round(m / 1000) + ' km';
+    }
+
+    function formatDurSec(sec) {
+      sec = Math.round(sec);
+      if (sec < 3600) return Math.ceil(sec / 60) + ' min';
+      var h = Math.floor(sec / 3600);
+      var m = Math.ceil((sec % 3600) / 60);
+      return h + ' soat ' + m + ' min';
+    }
+
+    function formatEta(sec) {
+      var d = new Date(Date.now() + sec * 1000);
+      try {
+        if (d.toLocaleTimeString) {
+          return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+        }
+      } catch (e) {}
+      var h = d.getHours();
+      var m = d.getMinutes();
+      h = h < 10 ? '0' + h : '' + h;
+      m = m < 10 ? '0' + m : '' + m;
+      return h + ':' + m;
+    }
+
+    function stepIcon(type, modifier) {
+      if (type === 'arrive' || type === 'end-of-road') return '🏁';
+      if (type === 'depart' || type === 'continue') return '➡️';
+      if (type === 'turn') {
+        if (modifier === 'right' || modifier === 'sharp right' || modifier === 'slight right') return '↪️';
+        if (modifier === 'left' || modifier === 'sharp left' || modifier === 'slight left') return '↩️';
+        if (modifier === 'uturn') return '↩️';
+      }
+      if (type === 'roundabout' || type === 'rotary') return '🔃';
+      if (type === 'merge') return '⤴️';
+      if (type === 'fork') return '⑂';
+      return '➡️';
+    }
+
+    function stepUz(type, modifier, name) {
+      var street = name ? (' · ' + name) : '';
+      if (type === 'arrive') return 'Manzil' + street;
+      if (type === 'depart') return 'Yo‘nalish bo‘ylab davom eting' + street;
+      if (type === 'continue') return 'To‘g‘ri davom eting' + street;
+      if (type === 'turn') {
+        if (modifier === 'right' || modifier === 'sharp right') return 'O‘ngga buriling' + street;
+        if (modifier === 'slight right') return 'Silliq o‘ngga' + street;
+        if (modifier === 'left' || modifier === 'sharp left') return 'Chapga buriling' + street;
+        if (modifier === 'slight left') return 'Silliq chapga' + street;
+        if (modifier === 'uturn') return 'Qayrilish' + street;
+        return 'Burilish' + street;
+      }
+      if (type === 'roundabout' || type === 'rotary') return 'Aylanma yo‘l' + street;
+      if (type === 'merge') return 'Qoʻshilish' + street;
+      if (type === 'fork') return 'Talaffuz' + street;
+      if (type === 'end-of-road') return 'Yo‘l oxiri' + street;
+      return 'Davom eting' + street;
+    }
+
+    function pickNavStep(steps) {
+      if (!steps || !steps.length) return null;
+      if (steps.length > 1 && steps[0].type === 'depart') return steps[1];
+      return steps[0];
+    }
+
+    function txt(id, s) {
+      var el = document.getElementById(id);
+      if (el) el.textContent = s;
+    }
+
+    function applyRouteUi() {
+      var dm = Number(routeMeta.distance_m) || 0;
+      var ds = Number(routeMeta.duration_s) || 0;
+      txt('statDist', dm > 0 ? formatDistanceM(dm) : '—');
+      txt('statDur', ds > 0 ? formatDurSec(ds) : '—');
+      txt('statEta', ds > 0 ? formatEta(ds) : '—');
+
+      var navStep = pickNavStep(routeMeta.steps);
+      if (navStep) {
+        txt('navIcon', stepIcon(navStep.type, navStep.modifier));
+        txt('navDist', formatDistanceM(navStep.distance_m || 0));
+        txt('navStreet', stepUz(navStep.type, navStep.modifier, navStep.name));
+      } else if (routeGeom && routeGeom.coordinates && routeGeom.coordinates.length) {
+        txt('navIcon', '🛣️');
+        txt('navDist', dm > 0 ? formatDistanceM(dm) : '—');
+        txt('navStreet', 'Marshrut chizig‘i (taxminiy yo‘l)');
+      } else {
+        txt('navIcon', '📍');
+        txt('navDist', '');
+        txt('navStreet', 'Faqat nuqtalar — tarmoqda marshrut topilmadi');
+      }
+    }
+
+    try {
+      applyRouteUi();
+    } catch (err) {
+      txt('navStreet', 'Marshrut paneli ishlamadi — Telegram WebView yangilang yoki brauzerda sinang.');
+    }
+
+    var map = null;
+    var mapReady = false;
+    var pendingLiveTracking = false;
+    var driverMarker = null;
+    var lastPanAt = 0;
+    var lastLivePingSentAt = 0;
+    var liveStepIdx = 0;
+    var liveTrackingStarted = false;
+
+    function distanceMeters(lat1, lon1, lat2, lon2) {
+      var R = 6371000;
+      var p1 = lat1 * Math.PI / 180;
+      var p2 = lat2 * Math.PI / 180;
+      var dp = (lat2 - lat1) * Math.PI / 180;
+      var dl = (lon2 - lon1) * Math.PI / 180;
+      var a = Math.sin(dp / 2) * Math.sin(dp / 2) +
+              Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) * Math.sin(dl / 2);
+      var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    }
+
+    function pickLiveStepFromIndex(startIdx) {
+      var steps = (routeMeta && routeMeta.steps) ? routeMeta.steps : [];
+      for (var i = Math.max(0, startIdx || 0); i < steps.length; i++) {
+        var s = steps[i] || {};
+        if (typeof s.maneuver_lat === 'number' && typeof s.maneuver_lon === 'number') {
+          return i;
+        }
+      }
+      return -1;
+    }
+
+    function pickNearestStepIndex(lat, lon) {
+      var steps = (routeMeta && routeMeta.steps) ? routeMeta.steps : [];
+      var bestIdx = -1;
+      var bestDist = Number.POSITIVE_INFINITY;
+      for (var i = 0; i < steps.length; i++) {
+        var s = steps[i] || {};
+        if (typeof s.maneuver_lat !== 'number' || typeof s.maneuver_lon !== 'number') continue;
+        var d = distanceMeters(lat, lon, Number(s.maneuver_lat), Number(s.maneuver_lon));
+        if (d < bestDist) {
+          bestDist = d;
+          bestIdx = i;
+        }
+      }
+      return bestIdx;
+    }
+
+    function updateLiveInstruction(lat, lon) {
+      var steps = (routeMeta && routeMeta.steps) ? routeMeta.steps : [];
+      if (!steps.length) return;
+
+      var nearestIdx = pickNearestStepIndex(lat, lon);
+      if (nearestIdx >= 0) {
+        // Orqaga qaytib ketmaslik uchun minimal himoya:
+        // oldingi indexdan juda uzoqqa "sakrab" ketmasin.
+        if (liveStepIdx <= 0 || nearestIdx >= liveStepIdx - 2) {
+          liveStepIdx = nearestIdx;
+        }
+      } else if (liveStepIdx < 0 || liveStepIdx >= steps.length) {
+        liveStepIdx = pickLiveStepFromIndex(0);
+      }
+      if (liveStepIdx < 0) return;
+
+      var cur = steps[liveStepIdx] || {};
+      var dist = distanceMeters(lat, lon, Number(cur.maneuver_lat), Number(cur.maneuver_lon));
+
+      if (dist < 35) {
+        var nextIdx = pickLiveStepFromIndex(liveStepIdx + 1);
+        if (nextIdx >= 0) {
+          liveStepIdx = nextIdx;
+          cur = steps[liveStepIdx] || {};
+          dist = distanceMeters(lat, lon, Number(cur.maneuver_lat), Number(cur.maneuver_lon));
+        }
+      }
+
+      if (isFinite(dist) && dist >= 0) {
+        txt('navDist', formatDistanceM(dist));
+        txt('navIcon', stepIcon(cur.type, cur.modifier));
+        txt('navStreet', stepUz(cur.type, cur.modifier, cur.name));
+      }
+    }
+
+    function postLivePing(lat, lon) {
+      if (!livePingUrl) return;
+      var now = Date.now();
+      if (now - lastLivePingSentAt < 4500) return;
+      lastLivePingSentAt = now;
+      try {
+        fetch(livePingUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({ lat: lat, lon: lon }),
+          keepalive: true,
+        }).catch(function () {});
+      } catch (e) {}
+    }
+
+    function startLiveTracking() {
+      if (!mapReady || !map) {
+        pendingLiveTracking = true;
+        return;
+      }
+      if (typeof navigator === 'undefined' || !navigator.geolocation) {
+        var kh0 = document.getElementById('ketdikHint');
+        if (kh0) {
+          kh0.textContent = 'Jonli kuzatuv uchun brauzer/Telegram GPS ruxsatini yoqing (HTTPS).';
+        }
+        return;
+      }
+      pendingLiveTracking = false;
+      if (liveTrackingStarted) return;
+      liveTrackingStarted = true;
+      liveStepIdx = pickLiveStepFromIndex(0);
+      var driverIcon = L.divIcon({
+        className: 'driver-here',
+        html: '<div style="width:20px;height:20px;border-radius:50%;background:#2563eb;border:3px solid #fff;box-shadow:0 0 0 4px rgba(37,99,235,.35),0 0 14px rgba(59,130,246,.45);"></div>',
+        iconSize: [20, 20],
+        iconAnchor: [10, 10],
+      });
+      navigator.geolocation.watchPosition(
+        function (pos) {
+          var ll = [pos.coords.latitude, pos.coords.longitude];
+          if (!driverMarker) {
+            driverMarker = L.marker(ll, { icon: driverIcon }).addTo(map).bindPopup('Sizning joylashuvingiz');
+          } else {
+            driverMarker.setLatLng(ll);
+          }
+          postLivePing(ll[0], ll[1]);
+          updateLiveInstruction(ll[0], ll[1]);
+          var now = Date.now();
+          if (now - lastPanAt > 4000) {
+            try {
+              map.panTo(ll, { animate: true, duration: 0.35 });
+            } catch (e) {}
+            lastPanAt = now;
+          }
+        },
+        function () {},
+        { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 }
+      );
+      var kh2 = document.getElementById('ketdikHint');
+      if (kh2) {
+        kh2.textContent = 'Jonli yo‘riqnoma yoqildi — burilish masofasi real vaqtda yangilanadi.';
+      }
+      var stateBtn = document.getElementById('ketdikBtn');
+      var stateBadge = document.getElementById('tripStateBadge');
+      if (stateBtn) stateBtn.style.display = 'none';
+      if (stateBadge) stateBadge.style.display = 'block';
+    }
+
+    function invalidateMapSize() {
+      if (!map || !mapReady) return;
+      try {
+        map.invalidateSize(true);
+      } catch (e) {}
+    }
+
+    function _loadLeafletFallback(done) {
+      if (typeof window.L !== 'undefined') {
+        done();
+        return;
+      }
+      var css = document.createElement('link');
+      css.rel = 'stylesheet';
+      css.href = 'https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css';
+      document.head.appendChild(css);
+
+      var js = document.createElement('script');
+      js.src = 'https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js';
+      js.async = true;
+      js.onload = function () { done(); };
+      js.onerror = function () { done(); };
+      document.head.appendChild(js);
+    }
+
+    function initMap() {
+      if (mapReady) return;
+      if (typeof window.L === 'undefined') {
+        txt('navStreet', 'Xarita kutubxonasi yuklanmadi. /static/bot/leaflet/ ochilyaptimi?');
+        return;
+      }
+      map = L.map('map', {
+        zoomControl: false,
+        attributionControl: true,
+      });
+
+      var cartoDark = L.tileLayer(
+        'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+        { maxZoom: 20, attribution: '&copy; OSM &copy; CARTO', subdomains: 'abcd' }
+      );
+      var cartoLight = L.tileLayer(
+        'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+        { maxZoom: 20, attribution: '&copy; OSM &copy; CARTO', subdomains: 'abcd' }
+      );
+      var fallbackOn = false;
+      cartoDark.on('tileerror', function () {
+        if (!fallbackOn && map) {
+          fallbackOn = true;
+          map.removeLayer(cartoDark);
+          cartoLight.addTo(map);
+        }
+      });
+      cartoDark.addTo(map);
+
+      var iconA = L.divIcon({
+        className: 'pickup-icon',
+        html: '<div style="width:18px;height:18px;border-radius:50%;background:#ef4444;border:3px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.5);"></div>',
+        iconSize: [18, 18],
+        iconAnchor: [9, 9],
+      });
+      var iconB = L.divIcon({
+        className: 'drop-icon',
+        html: '<div style="width:18px;height:18px;border-radius:50%;background:#22c55e;border:3px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.5);"></div>',
+        iconSize: [18, 18],
+        iconAnchor: [9, 9],
+      });
+
+      L.marker([fromLat, fromLon], { icon: iconA }).addTo(map).bindPopup('Yuk olish');
+      L.marker([toLat, toLon], { icon: iconB }).addTo(map).bindPopup('Tushirish');
+
+      if (routeGeom && routeGeom.type === 'LineString' && routeGeom.coordinates && routeGeom.coordinates.length) {
+        var latlngs = routeGeom.coordinates.map(function (c) { return [c[1], c[0]]; });
+        L.polyline(latlngs, { color: '#14532d', weight: 16, opacity: 0.30 }).addTo(map);
+        L.polyline(latlngs, { color: '#22c55e', weight: 8, opacity: 0.95 }).addTo(map);
+        L.polyline(latlngs, { color: '#bbf7d0', weight: 2.5, opacity: 0.9 }).addTo(map);
+        map.fitBounds(L.latLngBounds(latlngs), { padding: [100, 100] });
+      } else {
+        map.fitBounds([[fromLat, fromLon], [toLat, toLon]], { padding: [120, 120] });
+      }
+
+      document.getElementById('zoomIn').addEventListener('click', function () { map.zoomIn(); });
+      document.getElementById('zoomOut').addEventListener('click', function () { map.zoomOut(); });
+
+      mapReady = true;
+      setTimeout(invalidateMapSize, 50);
+      setTimeout(invalidateMapSize, 300);
+      setTimeout(invalidateMapSize, 800);
+      if (pendingLiveTracking) {
+        startLiveTracking();
+      }
+    }
+
+    try {
+      if (window.Telegram && window.Telegram.WebApp && typeof window.Telegram.WebApp.onEvent === 'function') {
+        window.Telegram.WebApp.onEvent('viewportChanged', invalidateMapSize);
+      }
+    } catch (e) {}
+    setTimeout(function () {
+      _loadLeafletFallback(function () {
+        initMap();
+        if (!showKetdik && livePingUrl) {
+          startLiveTracking();
+        }
+      });
+    }, 120);
+
+    (function wireKetdik() {
+      var btn = document.getElementById('ketdikBtn');
+      if (!btn || !showKetdik || !ketdikUrl) {
+        return;
+      }
+      btn.addEventListener('click', function () {
+        btn.disabled = true;
+        var hint = document.getElementById('ketdikHint');
+        if (hint) {
+          hint.textContent = 'Yuborilmoqda…';
+        }
+        fetch(ketdikUrl, { method: 'POST', headers: { Accept: 'application/json' } })
+          .then(function (r) {
+            return r.json().then(function (data) {
+              return { ok: r.ok, data: data };
+            });
+          })
+          .then(function (res) {
+            if (res.ok && res.data.ok) {
+              if (hint) {
+                hint.textContent = res.data.message || 'OK';
+              }
+              btn.disabled = true;
+              startLiveTracking();
+            } else {
+              btn.disabled = false;
+              if (hint) {
+                hint.textContent = (res.data && res.data.error) ? res.data.error : 'Xato';
+              }
+            }
+          })
+          .catch(function () {
+            btn.disabled = false;
+            if (hint) {
+              hint.textContent = 'Tarmoq xato — qayta urinib ko‘ring.';
+            }
+          });
+      });
+    })();
+
+    (function wireYandexNav() {
+      var btn = document.getElementById('openYandexNavBtn');
+      if (!btn) return;
+      btn.addEventListener('click', function () {
+        var fromLatNum = Number(fromLat);
+        var fromLonNum = Number(fromLon);
+        var toLatNum = Number(toLat);
+        var toLonNum = Number(toLon);
+        if (!isFinite(fromLatNum) || !isFinite(fromLonNum) || !isFinite(toLatNum) || !isFinite(toLonNum)) {
+          return;
+        }
+        var deepLink =
+          'yandexnavi://build_route_on_map?lat_to=' + encodeURIComponent(toLatNum) +
+          '&lon_to=' + encodeURIComponent(toLonNum) +
+          '&lat_from=' + encodeURIComponent(fromLatNum) +
+          '&lon_from=' + encodeURIComponent(fromLonNum);
+        var webFallback =
+          'https://yandex.com/maps/?rtext=' + encodeURIComponent(fromLatNum + ',' + fromLonNum) +
+          '~' + encodeURIComponent(toLatNum + ',' + toLonNum) + '&rtt=auto';
+
+        try {
+          if (window.Telegram && window.Telegram.WebApp && typeof window.Telegram.WebApp.openLink === 'function') {
+            window.Telegram.WebApp.openLink(webFallback, { try_instant_view: false });
+            return;
+          }
+        } catch (e) {}
+
+        try {
+          window.location.href = deepLink;
+          setTimeout(function () {
+            window.location.href = webFallback;
+          }, 700);
+        } catch (e) {
+          window.location.href = webFallback;
+        }
+      });
+    })();
+  </script>
+{% endif %}
+</body>
+</html>

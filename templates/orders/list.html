@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}Buyurtmalar | Shofir{% endblock %}
+{% block content %}
+<div class="card">
+  <h1 class="title">Buyurtmalar ro‘yxati</h1>
+  <p class="muted">Buyurtma hayoti, moliya maydonlari, holat va batafsil boshqaruv. Klientdan tushum yo‘q — «klient narxi» ustuni texnik (odatda 0).</p>
+  {% if safe_mode %}
+    <p class="muted" style="margin-top:6px">Xavfsiz rejim faol: ba'zi legacy raqam qiymatlari normallashtirildi.</p>
+  {% endif %}
+  <div class="actions">
+    <a class="btn" href="{% url 'order-create' %}">Yangi buyurtma</a>
+    <a class="btn btn-secondary" href="{% url 'ops-dashboard' %}">Operatsion panel</a>
+  </div>
+  <form method="get" class="row g-2 align-items-end" style="margin-top:14px;max-width:520px">
+    <div class="col-auto">
+      <label class="form-label small muted mb-0" for="id_status">Holat bo‘yicha</label>
+      <select name="status" id="id_status" class="form-select form-select-sm">
+        <option value="">Barchasi</option>
+        {% for val, label in order_status_choices %}
+          <option value="{{ val }}" {% if status_filter == val %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-auto">
+      <button type="submit" class="btn btn-secondary btn-sm">Filtrlash</button>
+      {% if status_filter %}
+        <a class="btn btn-outline-secondary btn-sm" href="{% url 'order-list' %}">Tozalash</a>
+      {% endif %}
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>№</th>
+          <th>Yo‘nalish</th>
+          <th>Klient</th>
+          <th>Yuk (reja)</th>
+          <th>Yuklangan</th>
+          <th>Topshirish</th>
+          <th>Farq (t)</th>
+          <th title="Tushum emas; maydon odatda 0">Klient maydoni</th>
+          <th>Shofyor to‘lovi</th>
+          <th title="client_price − chiqimlar; tushum 0 bo‘lsa manfiy bo‘lishi mumkin">Sof qoldiq</th>
+          <th>Holat</th>
+          <th>Harakat</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for order in orders %}
+          <tr>
+            <td>#{{ order.pk }}</td>
+            <td>{{ order.from_location }} -> {{ order.to_location }}</td>
+            <td>{% if safe_mode %}{{ order.client_name }}{% else %}{{ order.client|default:"-" }}{% endif %}</td>
+            <td>{{ order.cargo_type }} ({{ order.weight_ton }}t)</td>
+            {% if safe_mode %}
+              <td>{{ order.custody_loaded }}</td>
+              <td>{{ order.custody_delivered }}</td>
+              <td class="{% if order.custody_shortage != '—' and '≈' in order.custody_shortage %}custody-risk{% endif %}">{{ order.custody_shortage }}</td>
+            {% else %}
+              <td>{% if order.loaded_quantity is not None %}{{ order.loaded_quantity }} {{ order.get_loaded_quantity_uom_display }}{% else %}—{% endif %}</td>
+              <td>{% if order.delivered_quantity is not None %}{{ order.delivered_quantity }} {{ order.get_delivered_quantity_uom_display }}{% else %}—{% endif %}</td>
+              <td class="{% if order.quantity_shortage_metric_ton and order.quantity_shortage_metric_ton > 0 %}custody-risk{% endif %}">
+                {% if order.loaded_quantity is not None and order.delivered_quantity is not None and order.quantity_shortage_metric_ton is not None %}
+                  {% if order.quantity_shortage_metric_ton > 0 %}≈ {{ order.quantity_shortage_metric_ton }} t{% else %}0{% endif %}
+                {% else %}—{% endif %}
+              </td>
+            {% endif %}
+            <td>{{ order.client_price }}</td>
+            <td>{{ order.driver_fee }}</td>
+            <td>{{ order.gross_margin }}</td>
+            <td><span class="status-pill">{% if safe_mode %}{{ order.status_display }}{% else %}{{ order.get_status_display }}{% endif %}</span></td>
+            <td><a class="btn btn-secondary" href="{% url 'order-detail' order.pk %}">Ko‘rish</a></td>
+          </tr>
+        {% empty %}
+          <tr>
+            <td colspan="12">Buyurtmalar hali mavjud emas.</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% if page_obj and page_obj.paginator.num_pages > 1 %}
+<div class="card">
+  <div class="row-inline">
+    <span class="muted">Sahifa {{ page_obj.number }} / {{ page_obj.paginator.num_pages }}</span>
+    {% if page_obj.has_previous %}
+      <a class="btn btn-secondary" href="?page={{ page_obj.previous_page_number }}{% if status_filter %}&amp;status={{ status_filter }}{% endif %}">Oldingi</a>
+    {% endif %}
+    {% if page_obj.has_next %}
+      <a class="btn btn-secondary" href="?page={{ page_obj.next_page_number }}{% if status_filter %}&amp;status={{ status_filter }}{% endif %}">Keyingi</a>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+{% endblock %}

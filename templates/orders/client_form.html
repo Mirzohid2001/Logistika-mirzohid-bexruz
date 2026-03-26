@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Klient formasi | Shofir{% endblock %}
+{% block content %}
+{% include "orders/client_tabs.html" with active_tab="crud" %}
+<div class="card">
+  <h1 class="title">{% if mode == "edit" %}Klientni tahrirlash{% else %}Yangi klient{% endif %}</h1>
+  <p class="muted" style="margin-bottom:16px">Kontrakt stavkalari va to‘lov sharti — asosan ma’lumot/SLA uchun. Hozirgi buyurtma oqimida klientdan tushum yo‘q; yangi buyurtmada klient narxi 0 saqlanadi.</p>
+  <form method="post">
+    {% csrf_token %}
+    {% for field in form %}
+      <div class="row">
+        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {{ field }}
+        {{ field.errors }}
+      </div>
+    {% endfor %}
+    <div class="actions">
+      <button class="btn" type="submit">Saqlash</button>
+      <a class="btn btn-secondary" href="{% url 'client-list' %}">Bekor qilish</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

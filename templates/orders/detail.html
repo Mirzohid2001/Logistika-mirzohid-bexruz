@@ -1,0 +1,387 @@
+{% extends "base.html" %}
+{% block title %}Buyurtma #{{ order.pk }} | Shofir{% endblock %}
+{% block content %}
+<div class="card">
+  <h1 class="title">Buyurtma #{{ order.pk }}</h1>
+  <div class="meta-grid">
+    <div class="meta-item">
+      <b>Qayerdan</b>
+      <span>{{ order.from_location }}</span>
+    </div>
+    <div class="meta-item">
+      <b>Qayerga</b>
+      <span>{{ order.to_location }}</span>
+    </div>
+    <div class="meta-item">
+      <b>Klient</b>
+      <span>{{ order.client|default:"-" }}</span>
+    </div>
+    <div class="meta-item">
+      <b>To‘lov sharti</b>
+      <span>{{ order.get_payment_terms_display }}</span>
+    </div>
+    <div class="meta-item">
+      <b>Yuk (reja)</b>
+      <span>{{ order.cargo_type }} ({{ order.weight_ton }} tonna)</span>
+    </div>
+    {% if order.loaded_quantity is not None %}
+      <div class="meta-item">
+        <b>Yuklangan (fakt)</b>
+        <span>{{ order.loaded_quantity }} {{ order.get_loaded_quantity_uom_display }}{% if order.loaded_quantity_metric_ton %} → ≈ {{ order.loaded_quantity_metric_ton }} t{% endif %}</span>
+      </div>
+    {% endif %}
+    {% if order.delivered_quantity is not None %}
+      <div class="meta-item">
+        <b>Klientga topshirilgan</b>
+        <span>{{ order.delivered_quantity }} {{ order.get_delivered_quantity_uom_display }}{% if order.delivered_quantity_metric_ton %} → ≈ {{ order.delivered_quantity_metric_ton }} t{% endif %}</span>
+      </div>
+    {% endif %}
+    {% if order.density_kg_per_liter %}
+      <div class="meta-item">
+        <b>Zichlik</b>
+        <span>{{ order.density_kg_per_liter }} kg/L</span>
+      </div>
+    {% endif %}
+    {% if order.quantity_shortage_metric_ton and order.quantity_shortage_metric_ton > 0 %}
+      <div class="meta-item" style="border-left:3px solid #c0392b;padding-left:10px">
+        <b>Farq (yuk − topshirish)</b>
+        <span>≈ {{ order.quantity_shortage_metric_ton }} t — tekshiruv tavsiya</span>
+      </div>
+    {% endif %}
+    {% if order.shortage_kg is not None %}
+      <div class="meta-item" style="border-left:3px solid #ef4444;padding-left:10px">
+        <b>Kamomad (kg)</b>
+        <span>{{ order.shortage_kg }} kg{% if order.shortage_penalty_points %} · penalti: -{{ order.shortage_penalty_points }} ball{% endif %}</span>
+      </div>
+    {% endif %}
+    {% if order.shortage_note %}
+      <div class="meta-item">
+        <b>Kamomad izohi</b>
+        <span>{{ order.shortage_note }}</span>
+      </div>
+    {% endif %}
+    <div class="meta-item" title="Klientdan tushum yo‘q; maydon texnik, odatda 0">
+      <b>Klient maydoni (tushum emas)</b>
+      <span>{{ order.client_price }}</span>
+    </div>
+    <div class="meta-item">
+      <b>Shofyor to‘lovi</b>
+      <span>{{ order.driver_fee }}</span>
+    </div>
+    <div class="meta-item" title="Maydon − chiqimlar; tushum 0 bo‘lsa manfiy">
+      <b>Sof qoldiq</b>
+      <span>{{ order.gross_margin }}</span>
+    </div>
+    <div class="meta-item">
+      <b>Kontakt</b>
+      <span>{{ order.contact_name }} | {{ order.contact_phone }}</span>
+    </div>
+    <div class="meta-item">
+      <b>Holat</b>
+      <span class="status-pill">{{ order.get_status_display }}</span>
+    </div>
+    <div class="meta-item">
+      <b>Qaytish reysi</b>
+      <span>{% if order.is_return_trip %}Ha (#{{ order.return_of_id }}){% else %}Yo‘q{% endif %}</span>
+    </div>
+    <div class="meta-item">
+      <b>Bo‘lingan yuk</b>
+      <span>{% if order.parent_order_id %}Qism {{ order.split_index }}/{{ order.split_total }}{% elif order.split_children.exists %}Asosiy buyurtma{% else %}Yo‘q{% endif %}</span>
+    </div>
+    {% if order.client %}
+      <div class="meta-item">
+        <b>Klient SLA</b>
+        <span>{{ order.client.sla_minutes }} daqiqa</span>
+      </div>
+      <div class="meta-item">
+        <b>Klient kontrakt</b>
+        <span>{{ order.client.contract_base_rate_per_ton }} / tonna, min {{ order.client.contract_min_fee }}</span>
+      </div>
+    {% endif %}
+  </div>
+  <div class="actions">
+    <a class="btn" href="{% url 'order-create' %}">Yangi buyurtma</a>
+    <a class="btn btn-secondary" href="{% url 'order-list' %}">Ro‘yxatga qaytish</a>
+  </div>
+</div>
+
+<div class="card">
+  <h2 class="title">Hajm nazorati (zavod → klient)</h2>
+  <p class="muted">Tarozi yoki o‘lchovchi bo‘yicha fakt. Litr ishlatsangiz, avval zichlik (kg/L) kiriting — keyin litr avtomatik tonnaga hisoblanadi.</p>
+  <form method="post" action="{% url 'order-custody-update' order.pk %}">
+    {% csrf_token %}
+    <div class="row g-3">
+      <div class="col-md-4">
+        <label class="form-label" for="id_loaded_quantity">{{ custody_form.loaded_quantity.label }}</label>
+        {{ custody_form.loaded_quantity }}
+        {% if custody_form.loaded_quantity.errors %}<div class="text-danger small">{{ custody_form.loaded_quantity.errors }}</div>{% endif %}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label" for="id_loaded_quantity_uom">{{ custody_form.loaded_quantity_uom.label }}</label>
+        {{ custody_form.loaded_quantity_uom }}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label" for="id_density_kg_per_liter">{{ custody_form.density_kg_per_liter.label }}</label>
+        {{ custody_form.density_kg_per_liter }}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label" for="id_delivered_quantity">{{ custody_form.delivered_quantity.label }}</label>
+        {{ custody_form.delivered_quantity }}
+        {% if custody_form.delivered_quantity.errors %}<div class="text-danger small">{{ custody_form.delivered_quantity.errors }}</div>{% endif %}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label" for="id_delivered_quantity_uom">{{ custody_form.delivered_quantity_uom.label }}</label>
+        {{ custody_form.delivered_quantity_uom }}
+      </div>
+      <div class="col-md-4 d-flex align-items-end">
+        <button class="btn btn-primary w-100" type="submit">Hajmni saqlash</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <h2 class="title">Chegaraviy holatlar</h2>
+  <div class="actions">
+    <form method="post" action="{% url 'order-reopen' order.pk %}">
+      {% csrf_token %}
+      <button class="btn btn-secondary" type="submit">Qayta ochish (muammo)</button>
+    </form>
+    <form method="post" action="{% url 'order-return-trip' order.pk %}">
+      {% csrf_token %}
+      <button class="btn btn-secondary" type="submit">Qaytish reysi yaratish</button>
+    </form>
+    <form method="post" action="{% url 'order-split' order.pk %}" class="split-form">
+      {% csrf_token %}
+      <input type="number" name="parts" min="2" max="{{ split_shipment_max_parts }}" value="2">
+      <button class="btn btn-secondary" type="submit">Yukni bo‘lish</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <h2 class="title">Shofyor javoblari (Telegram)</h2>
+  {% if driver_responses %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Shofyor</th>
+            <th>Javob</th>
+            <th>Tasdiq holati</th>
+            <th>Izoh</th>
+            <th>Vaqt</th>
+            <th>Amal</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in driver_responses %}
+            <tr>
+              <td>{{ r.driver.full_name }}</td>
+              <td>{{ r.get_decision_display }}</td>
+              <td>{{ r.get_approval_status_display }}</td>
+              <td>{{ r.note|default:"-" }}</td>
+              <td>{{ r.responded_at|date:"d.m.Y H:i" }}</td>
+              <td>
+                {% if r.decision == "accept" and r.approval_status == "pending" %}
+                  <form method="post" action="{% url 'order-response-approve' order.pk r.pk %}" style="display:inline">
+                    {% csrf_token %}
+                    <button class="btn btn-secondary" type="submit">Tasdiqlash</button>
+                  </form>
+                  <form method="post" action="{% url 'order-response-decline' order.pk r.pk %}" style="display:inline">
+                    {% csrf_token %}
+                    <button class="btn btn-secondary" type="submit">Rad etish</button>
+                  </form>
+                {% else %}
+                  -
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">Hali shofyor javoblari yo'q.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2 class="title">Tender va narxlash</h2>
+  <div class="actions">
+    <form method="post" action="{% url 'order-tender-open' order.pk %}" class="split-form">
+      {% csrf_token %}
+      <input type="number" name="duration_minutes" min="{{ tender_duration_min }}" max="{{ tender_duration_max }}" value="{{ tender_duration_default }}">
+      <button class="btn btn-secondary" type="submit">Tender ochish ({{ tender_duration_min }}–{{ tender_duration_max }} min)</button>
+    </form>
+    <form method="post" action="{% url 'order-tender-bid' order.pk %}" class="split-form">
+      {% csrf_token %}
+      <input type="text" name="bidder_name" placeholder="Taklif beruvchi">
+      <input type="number" name="bid_price" step="0.01" placeholder="Narx">
+      <input type="number" name="eta_minutes" placeholder="Yetib borish (daq.)">
+      <button class="btn btn-secondary" type="submit">Taklif qo'shish</button>
+    </form>
+    <form method="post" action="{% url 'order-tender-close' order.pk %}">
+      {% csrf_token %}
+      <button class="btn btn-secondary" type="submit">Auto winner tanlash</button>
+    </form>
+  </div>
+  {% if quote_preview %}
+      <div class="meta-grid">
+        <div class="meta-item"><b>Masofa</b><span>{{ quote_preview.distance_km }} km</span></div>
+        <div class="meta-item"><b>Tonna bo‘yicha</b><span>{{ quote_preview.weight_cost }}</span></div>
+        <div class="meta-item"><b>Kutish</b><span>{{ quote_preview.wait_cost }}</span></div>
+        <div class="meta-item"><b>Bo‘sh qaytish</b><span>{{ quote_preview.empty_return_cost }}</span></div>
+        <div class="meta-item"><b>Peak koeffitsiyent</b><span>{{ quote_preview.peak_coef }}</span></div>
+        <div class="meta-item"><b>Taklif narx</b><span>{{ quote_preview.suggested_price }}</span></div>
+      </div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2 class="title">Live tracking (Buyurtma)</h2>
+  <label class="form-check-label muted" style="display:inline-flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer">
+    <input type="checkbox" id="orderMapFollowDriver" class="form-check-input" checked />
+    Haydovchini kuzatish (xarita silliq siljiydi)
+  </label>
+  <div id="orderLiveMap" style="height:min(420px,55vh);border-radius:12px;overflow:hidden;border:1px solid var(--bs-border-color,#dee2e6)"></div>
+  <p class="muted" style="margin-top:10px">
+    Yuk olish / tushirish, reja marshruti va haydovchi <b>jonli izi</b> (Telegram Live). Yangilanish ~3 s.
+  </p>
+  {% if finish_request_exists and order.status == "in_transit" %}
+    <div class="actions" style="margin-top:12px">
+      <form method="post" action="{% url 'order-finish-confirm' order.pk %}">
+        {% csrf_token %}
+        <div style="display:flex;flex-direction:column;gap:8px;min-width:min(620px,90vw)">
+          <label class="form-label" for="shortage_note_{{ order.pk }}">Kamomad bo‘lsa izoh (70kg+ majburiy)</label>
+          <textarea id="shortage_note_{{ order.pk }}" name="shortage_note" rows="2" placeholder="Masalan: obyekt tarozisidagi akt bo‘yicha 82kg farq, qayta o‘lchash kutilmoqda"></textarea>
+        </div>
+        <button class="btn btn-secondary" type="submit">Admin tasdiqladi: Tugallandi</button>
+      </form>
+    </div>
+    <p class="muted" style="margin-top:8px">
+      Haydovchi tugallash so'rovini yubordi.
+      {% if finish_request_created_at %}Vaqt: {{ finish_request_created_at|date:"d.m.Y H:i" }}{% endif %}
+    </p>
+  {% endif %}
+</div>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+{{ pickup_point|json_script:"pickup-point" }}
+{{ dropoff_point|json_script:"dropoff-point" }}
+{{ live_driver_point|json_script:"live-driver-point" }}
+{{ route_polyline_points|json_script:"route-polyline" }}
+{{ geofence_polygon_points|json_script:"geofence-polygon" }}
+
+<script>
+  const pickup = JSON.parse(document.getElementById("pickup-point").textContent || "null");
+  const dropoff = JSON.parse(document.getElementById("dropoff-point").textContent || "null");
+  const initialDriver = JSON.parse(document.getElementById("live-driver-point").textContent || "null");
+  const routePolyline = JSON.parse(document.getElementById("route-polyline").textContent || "[]");
+  const geofencePolygon = JSON.parse(document.getElementById("geofence-polygon").textContent || "[]");
+
+  const mapNode = document.getElementById("orderLiveMap");
+  if (mapNode) {
+    const map = L.map(mapNode).setView([41.31, 69.24], 10);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { maxZoom: 20, attribution: '&copy; OSM &copy; CARTO', subdomains: 'abcd' }).addTo(map);
+
+    const bounds = [];
+
+    function addPin(point, color, label) {
+      if (!point || typeof point.lat !== "number" || typeof point.lon !== "number") return null;
+      const marker = L.marker([point.lat, point.lon]).addTo(map);
+      marker.bindPopup(label);
+      bounds.push([point.lat, point.lon]);
+      return marker;
+    }
+
+    addPin(pickup, "green", "Yuk olish");
+    addPin(dropoff, "red", "Tushirish");
+
+    // Route polyline
+    if (Array.isArray(routePolyline) && routePolyline.length > 1) {
+      const coords = routePolyline.map(p => [p.lat, p.lon]);
+      L.polyline(coords, { color: "blue", weight: 4, opacity: 0.75 }).addTo(map);
+      coords.forEach(c => bounds.push(c));
+    }
+
+    // Geofence polygon
+    if (Array.isArray(geofencePolygon) && geofencePolygon.length > 2) {
+      const coords = geofencePolygon.map(p => [p.lat, p.lon]);
+      L.polygon(coords, { color: "orange", fillColor: "orange", fillOpacity: 0.1, weight: 3 }).addTo(map);
+      coords.forEach(c => bounds.push(c));
+    }
+
+    const followEl = document.getElementById("orderMapFollowDriver");
+    let driverMarker = null;
+    let trailLayer = null;
+    function setDriverMarker(point) {
+      if (!point || typeof point.lat !== "number" || typeof point.lon !== "number") return;
+      const latlng = L.latLng(point.lat, point.lon);
+      const popupText = (point.driver ? point.driver : "Haydovchi") + "<br/>" + (point.captured_at ? point.captured_at : "");
+      if (!driverMarker) {
+        driverMarker = L.circleMarker(latlng, {
+          radius: 11,
+          color: "#fff",
+          fillColor: "#2563eb",
+          fillOpacity: 1,
+          weight: 3,
+        }).addTo(map);
+        driverMarker.bindPopup(popupText);
+      } else {
+        driverMarker.setLatLng(latlng);
+        driverMarker.setPopupContent(popupText);
+      }
+      if (followEl && followEl.checked) {
+        map.panTo(latlng, { animate: true, duration: 0.35, easeLinearity: 0.5 });
+      }
+    }
+
+    function setTrail(trail) {
+      if (!Array.isArray(trail) || trail.length < 2) {
+        if (trailLayer) {
+          map.removeLayer(trailLayer);
+          trailLayer = null;
+        }
+        return;
+      }
+      const coords = trail.map((p) => [p.lat, p.lon]);
+      if (!trailLayer) {
+        trailLayer = L.polyline(coords, {
+          color: "#2563eb",
+          weight: 6,
+          opacity: 0.78,
+          lineJoin: "round",
+          lineCap: "round",
+        }).addTo(map);
+      } else {
+        trailLayer.setLatLngs(coords);
+      }
+    }
+
+    if (initialDriver && initialDriver.lat != null) setDriverMarker(initialDriver);
+
+    if (bounds.length > 0) map.fitBounds(bounds, { padding: [20, 20] });
+
+    const liveUrl = "{% url 'order-live-location' order.pk %}";
+    async function pollLive() {
+      try {
+        const res = await fetch(liveUrl, { headers: { "Accept": "application/json" } });
+        const data = await res.json();
+        if (data && data.ok) {
+          if (Array.isArray(data.trail) && data.trail.length > 1) setTrail(data.trail);
+          setDriverMarker(data);
+        }
+      } catch (e) {
+        // Silent — oflayn bo'lsa ham UI yiqilmasin.
+      }
+    }
+
+    setInterval(pollLive, 3000);
+    pollLive();
+    setTimeout(function () { map.invalidateSize(); }, 200);
+  }
+</script>
+{% endblock %}

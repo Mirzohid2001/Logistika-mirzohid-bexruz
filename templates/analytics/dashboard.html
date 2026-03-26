@@ -1,0 +1,265 @@
+{% extends "base.html" %}
+{% block title %}Operatsion panel | Shofir{% endblock %}
+{% block content %}
+<div class="card">
+  <h1 class="title">Operatsion panel</h1>
+  {% if monthly_report %}
+    <p class="muted">
+      {{ monthly_report.year }}-{{ monthly_report.month }} |
+      Bajarilgan: {{ monthly_report.completed_orders }} |
+      Bekor: {{ monthly_report.canceled_orders }} |
+      Muammo: {{ monthly_report.issue_orders }} |
+      On-time: {{ monthly_report.on_time_rate }}%
+      <br/><span class="small">Moliya: klientdan tushum yo‘q — grafiklardagi «tushum» maydoni texnik yig‘indi bo‘lishi mumkin.</span>
+    </p>
+  {% else %}
+    <p class="muted">Hisobot hali generatsiya qilinmagan.</p>
+  {% endif %}
+  <form class="report-form" method="get" action="{% url 'generate-monthly-report' %}">
+    <div class="row-inline">
+      <div>
+        <label for="year">Yil</label>
+        <input id="year" type="number" name="year" min="2020" max="2100" value="{% now 'Y' %}">
+      </div>
+      <div>
+        <label for="month">Oy</label>
+        <input id="month" type="number" name="month" min="1" max="12" value="{% now 'n' %}">
+      </div>
+      <div class="row-inline-action">
+        <button class="btn" type="submit">Oylik hisobotni yangilash</button>
+      </div>
+      <div class="row-inline-action">
+        <a class="btn btn-secondary" href="{% url 'generate-monthly-report' %}?year={% now 'Y' %}&month={% now 'n' %}&async=1">Navbat orqali yangilash</a>
+      </div>
+    </div>
+  </form>
+  <div class="actions">
+    <a class="btn" href="{% url 'accounting-pnl-report' %}">Buxgalteriya P&amp;L</a>
+    <a class="btn btn-secondary" href="{% url 'export-clients-report-csv' %}">Klientlar CSV</a>
+    <a class="btn btn-secondary" href="{% url 'export-drivers-report-csv' %}">Shofyorlar CSV</a>
+    <a class="btn btn-secondary" href="{% url 'export-drivers-report-xlsx' %}">Shofyorlar XLSX</a>
+  </div>
+</div>
+
+<div class="card" style="border-left:4px solid {% if pending_driver_verifications %}#c0392b{% else %}#27ae60{% endif %}">
+  <h2 class="title">Haydovchi tasdiqlari (bot ro'yxatdan o'tish)</h2>
+  {% if pending_driver_verifications %}
+    <p class="muted"><b>{{ pending_driver_verifications|length }}</b> ta haydovchi admin tasdiqlashini kutmoqda. Hujjatlarni ko'rib chiqing.</p>
+    <div class="actions">
+      <a class="btn" href="{% url 'driver-list' %}">Shofyorlar ro'yxati</a>
+    </div>
+    <div class="table-wrap" style="margin-top:12px">
+      <table>
+        <thead><tr><th>№</th><th>Ism</th><th>Telefon</th><th>Telegram</th><th>Yuborilgan</th><th>Harakat</th></tr></thead>
+        <tbody>
+        {% for d in pending_driver_verifications %}
+          <tr>
+            <td>#{{ d.pk }}</td>
+            <td>{{ d.full_name }}</td>
+            <td>{{ d.phone }}</td>
+            <td>{% if d.telegram_user_id %}✓{% else %}—{% endif %}</td>
+            <td>{{ d.registration_submitted_at|default:"—" }}</td>
+            <td><a class="btn btn-secondary" href="{% url 'driver-detail' d.pk %}">Ko'rish / tasdiqlash</a></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">Kutilayotgan tasdiqlash yo'q.</p>
+    <a class="btn btn-secondary" href="{% url 'driver-list' %}">Shofyorlar</a>
+  {% endif %}
+</div>
+
+<div class="card" style="border-left:4px solid {% if no_live_track_alerts %}#c0392b{% else %}#27ae60{% endif %}">
+  <h2 class="title">Live yoqilmagan reyslar</h2>
+  {% if no_live_track_alerts %}
+    <p class="muted"><b>{{ no_live_track_alerts|length }}</b> ta reysda Ketdik bosilgan, lekin Live Location hali yoqilmagan.</p>
+    <div class="table-wrap" style="margin-top:12px">
+      <table>
+        <thead><tr><th>Vaqt</th><th>Buyurtma</th><th>Haydovchi</th><th>Xabar</th><th>Harakat</th></tr></thead>
+        <tbody>
+        {% for a in no_live_track_alerts %}
+          <tr>
+            <td>{{ a.created_at }}</td>
+            <td>{% if a.order_id %}#{{ a.order_id }}{% else %}-{% endif %}</td>
+            <td>{{ a.driver.full_name|default:"-" }}</td>
+            <td>{{ a.message }}</td>
+            <td>{% if a.order_id %}<a class="btn btn-secondary" href="/orders/{{ a.order_id }}/">Orderni ochish</a>{% else %}-{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">Hammasi joyida: Ketdikdan keyin live tracking yoqilgan.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2 class="title">Alertlar (SLA/Route)</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Vaqt</th><th>Turi</th><th>Buyurtma</th><th>Shofyor</th><th>Xabar</th></tr></thead>
+      <tbody>
+      {% for alert in recent_alerts %}
+        <tr>
+          <td>{{ alert.created_at }}</td>
+          <td>{{ alert.get_alert_type_display }}</td>
+          <td>{% if alert.order_id %}#{{ alert.order_id }}{% else %}-{% endif %}</td>
+          <td>{{ alert.driver.full_name|default:"-" }}</td>
+          <td>{{ alert.message }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="5">Alert yo'q.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2 class="title">Oylik operatsion trend</h2>
+  <canvas id="financeChart" height="120"></canvas>
+  <p id="financeChartEmpty" class="muted" style="display:none;margin-top:10px">
+    Bu period uchun trend ma'lumot topilmadi. Yangi hisobot yaratish uchun yuqoridagi tugmani bosing.
+  </p>
+</div>
+
+<div class="card">
+  <h2 class="title">Top klientlar (yetkazib berish va reyting)</h2>
+  <canvas id="clientChart" height="120"></canvas>
+  <p id="clientChartEmpty" class="muted" style="display:none;margin-top:10px">
+    Top klientlar bo'yicha ma'lumot topilmadi. Buyurtmalarni yoki hisobotni yangilang.
+  </p>
+</div>
+
+<div class="card">
+  <h2 class="title">Aktiv yuklar</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>№</th><th>Klient</th><th>Yo‘nalish</th><th>Holat</th></tr></thead>
+      <tbody>
+      {% for order in active_orders %}
+        <tr>
+          <td>#{{ order.pk }}</td>
+          <td>{{ order.client|default:"-" }}</td>
+          <td>{{ order.from_location }} -> {{ order.to_location }}</td>
+          <td><span class="status-pill">{{ order.get_status_display }}</span></td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="4">Aktiv yuk yo‘q.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2 class="title">Shofyor lokatsiyalari</h2>
+  <div id="liveMap" style="height:320px;border:1px solid #d9e0ea;border-radius:10px;margin-bottom:12px"></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Shofyor</th><th>Buyurtma</th><th>Koordinata</th><th>Vaqt</th><th>Holat</th></tr></thead>
+      <tbody>
+      {% for ping in latest_locations %}
+        <tr>
+          <td>{{ ping.driver.full_name }}</td>
+          <td>#{{ ping.order_id }}</td>
+          <td>{{ ping.latitude }}, {{ ping.longitude }}</td>
+          <td>{{ ping.captured_at }}</td>
+          <td>{% if ping.is_stale %}Eski{% else %}Aktiv{% endif %}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="5">Lokatsiya ma'lumoti yo‘q.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2 class="title">Top shofyorlar</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Shofyor</th><th>Reyting</th><th>On-time</th><th title="Haydovchiga to‘langan">Oylik to‘lov (shofyor)</th></tr></thead>
+      <tbody>
+      {% for row in top_drivers %}
+        <tr>
+          <td>{{ row.driver.full_name }}</td>
+          <td>{{ row.rating_score }}</td>
+          <td>{{ row.on_time_rate }}%</td>
+          <td>{{ row.monthly_earnings }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="4">Reyting ma'lumoti yo‘q.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{{ finance_chart_json|json_script:"finance-chart-data" }}
+{{ client_chart_json|json_script:"client-chart-data" }}
+{{ map_points_json|json_script:"map-points-data" }}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+  const financeData = JSON.parse(document.getElementById("finance-chart-data").textContent);
+  const clientData = JSON.parse(document.getElementById("client-chart-data").textContent);
+
+  const financeCtx = document.getElementById("financeChart");
+  const financeEmpty = document.getElementById("financeChartEmpty");
+  if (financeCtx && financeData.labels && financeData.labels.length > 0) {
+    new Chart(financeCtx, {
+      type: "line",
+      data: {
+        labels: financeData.labels,
+        datasets: [
+          { label: "Bajarilgan", data: financeData.completed_orders, borderWidth: 2 },
+          { label: "Bekor", data: financeData.canceled_orders, borderWidth: 2 },
+          { label: "Muammo", data: financeData.issue_orders, borderWidth: 2 },
+        ],
+      },
+      options: { responsive: true, plugins: { legend: { position: "bottom" } } },
+    });
+  } else if (financeEmpty) {
+    financeEmpty.style.display = "block";
+  }
+
+  const clientCtx = document.getElementById("clientChart");
+  const clientEmpty = document.getElementById("clientChartEmpty");
+  if (clientCtx && clientData.labels && clientData.labels.length > 0) {
+    new Chart(clientCtx, {
+      type: "bar",
+      data: {
+        labels: clientData.labels,
+        datasets: [
+          { label: "Yetkazib berishlar", data: clientData.deliveries, borderWidth: 1 },
+          { label: "Reyting", data: clientData.ratings, borderWidth: 1 },
+        ],
+      },
+      options: { responsive: true, plugins: { legend: { position: "bottom" } } },
+    });
+  } else if (clientEmpty) {
+    clientEmpty.style.display = "block";
+  }
+
+  const mapPoints = JSON.parse(document.getElementById("map-points-data").textContent);
+  const mapNode = document.getElementById("liveMap");
+  if (mapNode) {
+    const map = L.map(mapNode).setView([41.31, 69.24], 10);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { maxZoom: 20, attribution: '&copy; OSM &copy; CARTO', subdomains: 'abcd' }).addTo(map);
+    const bounds = [];
+    mapPoints.forEach((point) => {
+      const marker = L.marker([point.lat, point.lon]).addTo(map);
+      marker.bindPopup(`${point.driver} | buyurtma #${point.order_id}`);
+      bounds.push([point.lat, point.lon]);
+    });
+    if (bounds.length > 0) {
+      map.fitBounds(bounds, { padding: [20, 20] });
+    }
+  }
+</script>
+{% endblock %}

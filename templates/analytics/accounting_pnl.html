@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}Buxgalteriya P&amp;L | Shofir{% endblock %}
+{% block content %}
+<div class="card">
+  <h1 class="title">Buxgalteriya: xarajatlar va sof natija</h1>
+  {% include "includes/business_model_notice.html" with variant="accounting" %}
+  <p class="muted">{{ range_note }}</p>
+  <form method="get" class="row g-2 align-items-end flex-wrap" style="margin-top:12px">
+    <div class="col-auto">
+      <label class="form-label small muted mb-0" for="id_period">Davr</label>
+      <select name="period" id="id_period" class="form-select form-select-sm">
+        <option value="month" {% if period == "month" %}selected{% endif %}>Oylik</option>
+        <option value="6m" {% if period == "6m" %}selected{% endif %}>So‘nggi 6 oy</option>
+        <option value="year" {% if period == "year" %}selected{% endif %}>Yil (12 oy)</option>
+      </select>
+    </div>
+    <div class="col-auto">
+      <label class="form-label small muted mb-0" for="id_year">Yil</label>
+      <input type="number" name="year" id="id_year" class="form-control form-control-sm" value="{{ year }}" min="2020" max="2100">
+    </div>
+    <div class="col-auto">
+      <label class="form-label small muted mb-0" for="id_month">Oy</label>
+      <select name="month" id="id_month" class="form-select form-select-sm">
+        {% for mm in month_options %}
+          <option value="{{ mm }}" {% if month == mm %}selected{% endif %}>{{ mm }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-auto">
+      <button type="submit" class="btn btn-primary btn-sm">Ko‘rsatish</button>
+    </div>
+    <div class="col-auto">
+      <a class="btn btn-outline-secondary btn-sm" href="{% url 'accounting-pnl-export-csv' %}?period={{ period }}&amp;year={{ year }}&amp;month={{ month }}">CSV yuklash</a>
+    </div>
+  </form>
+  <p class="muted" style="margin-top:10px"><b>{{ period_title }}</b></p>
+</div>
+
+<div class="card">
+  <h2 class="title">Oyma-oy yig‘indi</h2>
+  <p class="muted" style="margin-bottom:10px">«Klient maydoni» = <code>client_price</code> yig‘indisi (sizning modelda odatda 0). Asosiy chiqim — haydovchi va xarajatlar ustunlari.</p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Davr</th>
+          <th>Bajarilgan</th>
+          <th title="Ma’lumotlar bazasidagi client_price; klientdan tushum emas">Klient maydoni</th>
+          <th>Shofyor</th>
+          <th>Yoqilg‘i</th>
+          <th>Qo‘shimcha</th>
+          <th>Jarima</th>
+          <th>Sof foyda</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+          <tr>
+            <td>{{ r.period_label }}</td>
+            <td>{{ r.order_count }}</td>
+            <td>{{ r.gross_revenue }}</td>
+            <td>{{ r.total_driver_cost }}</td>
+            <td>{{ r.total_fuel_cost }}</td>
+            <td>{{ r.total_extra_cost }}</td>
+            <td>{{ r.total_penalty }}</td>
+            <td class="{% if r.net_margin < 0 %}custody-risk{% endif %}"><b>{{ r.net_margin }}</b></td>
+          </tr>
+        {% endfor %}
+        <tr style="font-weight:600;border-top:2px solid var(--line-strong)">
+          <td>Jami</td>
+          <td>{{ totals.order_count }}</td>
+          <td>{{ totals.gross_revenue }}</td>
+          <td>{{ totals.total_driver_cost }}</td>
+          <td>{{ totals.total_fuel_cost }}</td>
+          <td>{{ totals.total_extra_cost }}</td>
+          <td>{{ totals.total_penalty }}</td>
+          <td class="{% if totals.net_margin < 0 %}custody-risk{% endif %}">{{ totals.net_margin }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2 class="title">Haydovchilarga to‘lov (shu davr)</h2>
+  <p class="muted">Har bir haydovchi uchun biriktirilgan buyurtmalarning <code>driver_fee</code> yig‘indisi.</p>
+  {% if driver_rows %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Haydovchi</th>
+          <th>Reyslar</th>
+          <th>Jami to‘lov</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in driver_rows %}
+          <tr>
+            <td>{{ d.driver__full_name }}</td>
+            <td>{{ d.trips }}</td>
+            <td>{{ d.total_fee }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    <p class="muted">Tanlangan davrda yakunlangan buyurtmalar yo‘q.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <p class="muted" style="margin:0">Oylik snapshotlarni yangilash: <a href="{% url 'generate-monthly-report' %}">Hisobot generatsiyasi</a> (cache / grafiklar uchun).</p>
+</div>
+{% endblock %}

@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Klientlar reytingi | Shofir{% endblock %}
+{% block content %}
+{% include "orders/client_tabs.html" with active_tab="rating" %}
+<div class="card">
+  <h1 class="title">Klientlar reytingi</h1>
+  <p class="muted">{{ year }}-{{ month|stringformat:"02d" }} oyi bo'yicha yetkazib berish va reyting ko'rsatkichlari</p>
+  <form class="report-form" method="get">
+    <div class="row-inline">
+      <div>
+        <label for="year">Yil</label>
+        <input id="year" type="number" name="year" min="2020" max="2100" value="{{ year }}">
+      </div>
+      <div>
+        <label for="month">Oy</label>
+        <input id="month" type="number" name="month" min="1" max="12" value="{{ month }}">
+      </div>
+      <div>
+        <label for="top">Top N</label>
+        <input id="top" type="number" name="top" min="1" max="200" value="{{ top }}">
+      </div>
+      <div>
+        <label for="search">Qidiruv</label>
+        <input id="search" type="text" name="search" value="{{ search }}" placeholder="Klient nomi">
+      </div>
+      <div>
+        <label for="active_only">Faol klientlar</label>
+        <select id="active_only" name="active_only">
+          <option value="0" {% if not active_only %}selected{% endif %}>Barchasi</option>
+          <option value="1" {% if active_only %}selected{% endif %}>Faqat aktiv</option>
+        </select>
+      </div>
+      <div class="row-inline-action">
+        <button class="btn" type="submit">Filtrlash</button>
+      </div>
+      <div class="row-inline-action">
+        <a class="btn btn-secondary" href="{% url 'export-clients-report-csv' %}?year={{ year }}&month={{ month }}">CSV yuklash</a>
+      </div>
+      <div class="row-inline-action">
+        <a class="btn btn-secondary" href="{% url 'export-clients-report-pdf' %}?year={{ year }}&month={{ month }}">PDF yuklash</a>
+      </div>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Klient</th>
+          <th>Jami buyurtma</th>
+          <th>Oylik yetkazib berilgan</th>
+          <th>Yillik yetkazib berilgan</th>
+          <th>SLA breach %</th>
+          <th>Reyting</th>
+          <th>360</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for row in rows %}
+        <tr>
+          <td>{{ forloop.counter }}</td>
+          <td>{{ row.client.name }}</td>
+          <td>{{ row.total_orders }}</td>
+          <td>{{ row.completed_orders }}</td>
+          <td>{{ row.yearly_completed_orders }}</td>
+          <td>{{ row.sla_breach_ratio }}%</td>
+          <td>{{ row.client_rating_score }}</td>
+          <td><a class="btn btn-secondary" href="{% url 'client-360-report' row.client_id %}">Ochish</a></td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="8">Tanlangan davr uchun ma'lumot topilmadi.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% if page_obj.paginator.num_pages > 1 %}
+<div class="card">
+  <div class="row-inline">
+    <span class="muted">Sahifa {{ page_obj.number }} / {{ page_obj.paginator.num_pages }}</span>
+    {% if page_obj.has_previous %}
+      <a class="btn btn-secondary" href="?year={{ year }}&month={{ month }}&top={{ top }}&search={{ search }}&active_only={% if active_only %}1{% else %}0{% endif %}&page={{ page_obj.previous_page_number }}">Oldingi</a>
+    {% endif %}
+    {% if page_obj.has_next %}
+      <a class="btn btn-secondary" href="?year={{ year }}&month={{ month }}&top={{ top }}&search={{ search }}&active_only={% if active_only %}1{% else %}0{% endif %}&page={{ page_obj.next_page_number }}">Keyingi</a>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+{% endblock %}

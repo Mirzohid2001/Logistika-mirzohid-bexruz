@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Klient 360 | Shofir{% endblock %}
+{% block content %}
+{% include "orders/client_tabs.html" with active_tab="360" client_360_id=client_obj.id %}
+<div class="card">
+  <h1 class="title">{{ client_obj.name }} - 360</h1>
+  <p class="muted">12 oylik trend, top yo'nalishlar va muammo sabablari</p>
+</div>
+
+<div class="card">
+  <h2 class="title">12 oylik trend</h2>
+  <canvas id="client360Chart" height="120"></canvas>
+</div>
+
+<div class="card">
+  <h2 class="title">Top yo'nalishlar</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Qayerdan</th><th>Qayerga</th><th>Soni</th></tr></thead>
+      <tbody>
+      {% for row in top_routes %}
+        <tr>
+          <td>{{ row.from_location }}</td>
+          <td>{{ row.to_location }}</td>
+          <td>{{ row.total }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="3">Ma'lumot topilmadi.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2 class="title">Muammo sabablari</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Sabab (comment)</th><th>Soni</th></tr></thead>
+      <tbody>
+      {% for row in issue_reasons %}
+        <tr>
+          <td>{{ row.comment|default:"(bo'sh comment)" }}</td>
+          <td>{{ row.total }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="2">Muammo qaydlari topilmadi.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{{ chart_json|json_script:"client-360-data" }}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+  const data = JSON.parse(document.getElementById("client-360-data").textContent);
+  const ctx = document.getElementById("client360Chart");
+  if (ctx && data.labels && data.labels.length > 0) {
+    new Chart(ctx, {
+      type: "line",
+      data: {
+        labels: data.labels,
+        datasets: [
+          { label: "Yetkazib berilgan", data: data.deliveries, borderWidth: 2 },
+          { label: "Reyting", data: data.ratings, borderWidth: 2 },
+          { label: "SLA breach %", data: data.sla_breach_ratio, borderWidth: 2 },
+        ],
+      },
+      options: { responsive: true, plugins: { legend: { position: "bottom" } } },
+    });
+  }
+</script>
+{% endblock %}

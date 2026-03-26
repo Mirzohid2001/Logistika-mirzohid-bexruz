@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}Klient oylik/yillik hisobotlar | Shofir{% endblock %}
+{% block content %}
+{% include "orders/client_tabs.html" with active_tab="reports" %}
+<div class="card">
+  <h1 class="title">Klient oylik/yillik hisobotlar</h1>
+  <form class="report-form" method="get">
+    <div class="row-inline">
+      <div>
+        <label for="year">Yil</label>
+        <input id="year" type="number" name="year" min="2020" max="2100" value="{{ year }}">
+      </div>
+      <div>
+        <label for="month">Oy</label>
+        <input id="month" type="number" name="month" min="1" max="12" value="{{ month }}">
+      </div>
+      <div>
+        <label for="from">Boshlanish</label>
+        <input id="from" type="date" name="from">
+      </div>
+      <div>
+        <label for="to">Tugash</label>
+        <input id="to" type="date" name="to">
+      </div>
+      <div class="row-inline-action">
+        <button class="btn" type="submit">Yangilash</button>
+      </div>
+      <div class="row-inline-action">
+        <a class="btn btn-secondary" href="{% url 'export-clients-report-csv' %}?year={{ year }}&month={{ month }}">Oylik CSV</a>
+      </div>
+      <div class="row-inline-action">
+        <a class="btn btn-secondary" href="{% url 'export-clients-report-pdf' %}?year={{ year }}&month={{ month }}">Oylik PDF</a>
+      </div>
+      <div class="row-inline-action">
+        <a class="btn btn-secondary" href="{% url 'export-clients-yearly-report-csv' %}?year={{ year }}">Yillik CSV</a>
+      </div>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <h2 class="title">Oraliq bo‘yicha eksport</h2>
+  <form class="report-form" method="get" action="{% url 'export-clients-report-csv' %}">
+    <div class="row-inline">
+      <div>
+        <label for="range-from">From</label>
+        <input id="range-from" type="date" name="from">
+      </div>
+      <div>
+        <label for="range-to">To</label>
+        <input id="range-to" type="date" name="to">
+      </div>
+      <div class="row-inline-action">
+        <button class="btn btn-secondary" type="submit">Range CSV yuklash</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <h2 class="title">{{ year }}-{{ month|stringformat:"02d" }} oylik kesim</h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Klient</th>
+          <th>Jami buyurtma</th>
+          <th>Bajarilgan</th>
+          <th>Yillik bajarilgan</th>
+          <th>SLA breach %</th>
+          <th>Reyting</th>
+          <th>360</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for row in monthly_rows %}
+        <tr>
+          <td>{{ row.client.name }}</td>
+          <td>{{ row.total_orders }}</td>
+          <td>{{ row.completed_orders }}</td>
+          <td>{{ row.yearly_completed_orders }}</td>
+          <td>{{ row.sla_breach_ratio }}%</td>
+          <td>{{ row.client_rating_score }}</td>
+          <td><a class="btn btn-secondary" href="{% url 'client-360-report' row.client_id %}">Ochish</a></td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="7">Oylik ma'lumot topilmadi.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2 class="title">{{ year }} yillik kesim</h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Klient</th>
+          <th>Yillik jami buyurtma</th>
+          <th>Yillik bajarilgan</th>
+          <th>O'rtacha reyting</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for row in yearly_rows %}
+        <tr>
+          <td>{{ row.client__name }}</td>
+          <td>{{ row.yearly_total_orders }}</td>
+          <td>{{ row.yearly_completed_orders }}</td>
+          <td>{{ row.yearly_avg_rating|floatformat:2 }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="4">Yillik ma'lumot topilmadi.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
