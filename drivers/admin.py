@@ -2,7 +2,22 @@ from django.contrib import admin
 from django.urls import reverse
 from django.utils.html import format_html
 
-from .models import Driver, DriverVerificationAudit, Vehicle
+from .models import Driver, DriverDeliveryReview, DriverVerificationAudit, Vehicle
+
+
+@admin.register(DriverDeliveryReview)
+class DriverDeliveryReviewAdmin(admin.ModelAdmin):
+    list_display = ("id", "order", "driver", "stars", "recorded_by_username", "created_at", "updated_at")
+    list_filter = ("stars",)
+    search_fields = ("order__id", "driver__full_name", "comment", "recorded_by_username")
+    raw_id_fields = ("order", "driver")
+    readonly_fields = ("created_at", "updated_at")
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        from drivers.services import recompute_driver_rating_score
+
+        recompute_driver_rating_score(obj.driver)
 
 
 @admin.register(Driver)

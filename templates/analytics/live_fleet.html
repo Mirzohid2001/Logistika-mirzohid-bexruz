@@ -18,6 +18,7 @@
     <div class="meta-item"><b>Live bor</b><span>{{ fleet_counts.with_live|default:0 }}</span></div>
     <div class="meta-item"><b>Live yo‘q</b><span>{{ fleet_counts.without_live|default:0 }}</span></div>
     <div class="meta-item"><b>Eskirgan live (10+ min)</b><span>{{ fleet_counts.stale_live|default:0 }}</span></div>
+    <div class="meta-item"><b>No-live alert (ochiq)</b><span>{{ fleet_counts.no_live_alert_open|default:0 }}</span></div>
   </div>
 </div>
 
@@ -63,17 +64,18 @@
   <h2 class="title">Live yoqilmagan reyslar</h2>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Buyurtma</th><th>Holat</th><th>Yo‘nalish</th><th>Harakat</th></tr></thead>
+      <thead><tr><th>Buyurtma</th><th>Holat</th><th>SLA/no-live</th><th>Yo‘nalish</th><th>Harakat</th></tr></thead>
       <tbody id="fleet-missing-table-body">
         {% for m in missing_live %}
           <tr>
             <td>#{{ m.order_id }}</td>
             <td>{{ m.status }}</td>
+            <td>{% if m.no_live_alert_open %}<span class="custody-risk">Ochiq alert</span>{% else %}Kutilmoqda{% endif %}</td>
             <td>{{ m.from_short }} → {{ m.to_short }}</td>
             <td><a class="btn btn-secondary" href="/orders/{{ m.order_id }}/">Orderni ochish</a></td>
           </tr>
         {% empty %}
-          <tr><td colspan="4">Barchasida live yoqilgan.</td></tr>
+          <tr><td colspan="5">Barchasida live yoqilgan.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -256,12 +258,13 @@
     }
     if (missBody) {
       if (!missing || missing.length === 0) {
-        missBody.innerHTML = "<tr><td colspan='4'>Barchasida live yoqilgan.</td></tr>";
+        missBody.innerHTML = "<tr><td colspan='5'>Barchasida live yoqilgan.</td></tr>";
       } else {
         missBody.innerHTML = missing.map((m) => (
           "<tr>" +
           "<td>#"+ m.order_id +"</td>" +
           "<td>"+ (m.status || "-") +"</td>" +
+          "<td>"+ (m.no_live_alert_open ? "<span class='custody-risk'>Ochiq alert</span>" : "Kutilmoqda") +"</td>" +
           "<td>"+ ((m.from_short || "-") + " → " + (m.to_short || "-")) +"</td>" +
           "<td><a class='btn btn-secondary' href='/orders/" + m.order_id + "/'>Orderni ochish</a></td>" +
           "</tr>"

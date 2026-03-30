@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.http import HttpResponse
 import csv
 
-from .models import Client, ContractTariff, Order, OrderStateLog, PaymentLedger, RevenueLedger
+from .models import Client, ContractTariff, Order, OrderSeal, OrderStateLog, PaymentLedger, RevenueLedger
 from .services import create_return_trip, reopen_order, split_shipment
 
 
@@ -20,8 +20,14 @@ class ContractTariffAdmin(admin.ModelAdmin):
     search_fields = ("client__name", "cargo_type", "from_location", "to_location")
 
 
+class OrderSealInline(admin.TabularInline):
+    model = OrderSeal
+    extra = 0
+
+
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
+    inlines = (OrderSealInline,)
     list_display = (
         "id",
         "client",

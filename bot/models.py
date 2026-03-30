@@ -49,3 +49,32 @@ class DriverOnboardingState(models.Model):
 
     class Meta:
         ordering = ["-updated_at"]
+
+
+class TelegramGroupConfig(models.Model):
+    class GroupType(models.TextChoices):
+        ORDER_POST = "order_post", "Yuklarni post qilish guruhi"
+        OPS_NOTIFY = "ops_notify", "Xabarnoma (ops/dispatcher) guruhi"
+
+    name = models.CharField(max_length=100, blank=True, default="")
+    group_type = models.CharField(max_length=20, choices=GroupType.choices)
+    chat_id = models.CharField(max_length=50, help_text="Masalan: -1001234567890")
+    message_thread_id = models.IntegerField(null=True, blank=True, help_text="Forum topic ID (ixtiyoriy)")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["group_type", "-is_active", "-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["group_type"],
+                condition=models.Q(is_active=True),
+                name="uniq_active_telegram_group_per_type",
+            )
+        ]
+
+    def __str__(self) -> str:
+        label = self.get_group_type_display()
+        suffix = f" ({self.name})" if self.name else ""
+        return f"{label}{suffix}: {self.chat_id}"

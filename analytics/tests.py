@@ -127,6 +127,68 @@ class AnalyticsReportTests(TestCase):
         self.assertIn("markers", data)
         self.assertIn("missing_live", data)
 
+    def test_live_fleet_data_contains_freshness_and_no_live_alert_flags(self):
+        in_transit_order = Order.objects.create(
+            client=self.client_obj,
+            from_location="Tashkent",
+            to_location="Samarkand",
+            cargo_type="Oil",
+            weight_ton="8.00",
+            pickup_time=timezone.now(),
+            contact_name="Ops",
+            contact_phone="+99890",
+            status=OrderStatus.IN_TRANSIT,
+            client_price="0.00",
+            driver_fee="0.00",
+        )
+        Assignment.objects.create(order=in_transit_order, driver=self.driver, assigned_by="dispatcher")
+        LocationPing.objects.create(
+            order=in_transit_order,
+            driver=self.driver,
+            latitude="41.3111111",
+            longitude="69.2444444",
+            source=LocationSource.TELEGRAM,
+            captured_at=timezone.now() - timedelta(minutes=2),
+        )
+
+        missing_order = Order.objects.create(
+            client=self.client_obj,
+            from_location="Buxoro",
+            to_location="Navoiy",
+            cargo_type="Oil",
+            weight_ton="7.00",
+            pickup_time=timezone.now(),
+            contact_name="Ops",
+            contact_phone="+99891",
+            status=OrderStatus.IN_TRANSIT,
+            client_price="0.00",
+            driver_fee="0.00",
+        )
+        Assignment.objects.create(order=missing_order, driver=self.driver, assigned_by="dispatcher")
+        AlertEvent.objects.create(
+            order=missing_order,
+            driver=self.driver,
+            alert_type=AlertType.NO_LIVE_TRACK,
+            threshold_minutes=0,
+            message="No live yet",
+            resolved=False,
+        )
+
+        user = User.objects.create_user(username="staff_fleet2", password="x", is_staff=True)
+        user.groups.add(self.analyst_group)
+        self.client.force_login(user)
+        data = self.client.get(reverse("live-fleet-data")).json()
+
+        marker = next((m for m in data.get("markers", []) if m.get("order_id") == in_transit_order.pk), None)
+        self.assertIsNotNone(marker)
+        self.assertIn("age_sec", marker)
+        self.assertIsInstance(marker["age_sec"], int)
+
+        missing = next((m for m in data.get("missing_live", []) if m.get("order_id") == missing_order.pk), None)
+        self.assertIsNotNone(missing)
+        self.assertTrue(missing.get("no_live_alert_open"))
+        self.assertGreaterEqual(int(data.get("counts", {}).get("no_live_alert_open", 0)), 1)
+
     def test_generate_monthly_redirects_to_dashboard(self):
         user = User.objects.create_user(username="staff2", password="x", is_staff=True)
         user.groups.add(self.analyst_group)

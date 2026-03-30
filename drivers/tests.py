@@ -1,4 +1,7 @@
+from decimal import Decimal
+
 from django.contrib.auth.models import Group, User
+from django.core.exceptions import ValidationError
 from django.test import TestCase, override_settings
 from django.core.management import call_command
 from django.urls import reverse
@@ -8,7 +11,8 @@ import os
 
 from analytics.models import DriverPerformanceSnapshot
 from dispatch.models import Assignment
-from drivers.models import Driver, Vehicle
+from drivers.models import Driver, DriverDeliveryReview, Vehicle
+from drivers.services import recompute_driver_rating_score
 from orders.models import Order, OrderStatus
 from tracking.models import LocationPing, LocationSource
 
@@ -165,3 +169,102 @@ class DriverViewsTests(TestCase):
         vehicle_delete = self.client.post(reverse("vehicle-delete", args=[created_driver.pk, vehicle.pk]))
         self.assertEqual(vehicle_delete.status_code, 302)
         self.assertFalse(Vehicle.objects.filter(pk=vehicle.pk).exists())
+
+
+class DriverDeliveryReviewRatingTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="revstaff", password="x", is_staff=True)
+        g, _ = Group.objects.get_or_create(name="Dispatcher")
+        self.user.groups.add(g)
+        self.client.force_login(self.user)
+        self.driver = Driver.objects.create(
+            full_name="R Driver", phone="+99890111999", rating_score=Decimal("100.00")
+        )
+        self.order = Order.objects.create(
+            from_location="A",
+            to_location="B",
+            cargo_type="Oil",
+            weight_ton="10.00",
+            pickup_time=timezone.now(),
+            contact_name="U",
+            contact_phone="+99890",
+            status=OrderStatus.COMPLETED,
+            client_price="0",
+            driver_fee="100",
+            delivered_at=timezone.now(),
+        )
+        Assignment.objects.create(order=self.order, driver=self.driver, assigned_by="dispatcher")
+
+    def test_post_review_updates_rating(self):
+        r = self.client.post(
+            reverse("order-driver-review", args=[self.order.pk]),
+            {"stars": "4", "comment": "Yaxshi"},
+        )
+        self.assertEqual(r.status_code, 302)
+        self.driver.refresh_from_db()
+        self.assertEqual(self.driver.rating_score, Decimal("80.00"))
+        self.assertTrue(DriverDeliveryReview.objects.filter(order=self.order, stars=4).exists())
+
+    def test_average_two_orders_two_reviews(self):
+        o2 = Order.objects.create(
+            from_location="C",
+            to_location="D",
+            cargo_type="Oil",
+            weight_ton="5.00",
+            pickup_time=timezone.now(),
+            contact_name="U",
+            contact_phone="+99891",
+            status=OrderStatus.COMPLETED,
+            client_price="0",
+            driver_fee="50",
+            delivered_at=timezone.now(),
+        )
+        Assignment.objects.create(order=o2, driver=self.driver, assigned_by="dispatcher")
+        self.client.post(reverse("order-driver-review", args=[self.order.pk]), {"stars": "5", "comment": ""})
+        self.client.post(reverse("order-driver-review", args=[o2.pk]), {"stars": "3", "comment": ""})
+        self.driver.refresh_from_db()
+        # (5+3)/2 = 4 → 80
+        self.assertEqual(self.driver.rating_score, Decimal("80.00"))
+
+    def test_recompute_subtracts_shortage_penalties(self):
+        self.order.shortage_penalty_points = 10
+        self.order.save(update_fields=["shortage_penalty_points", "updated_at"])
+        DriverDeliveryReview.objects.create(order=self.order, driver=self.driver, stars=5, comment="")
+        recompute_driver_rating_score(self.driver)
+        self.driver.refresh_from_db()
+        self.assertEqual(self.driver.rating_score, Decimal("90.00"))
+
+    def test_recompute_none_driver_is_safe(self):
+        recompute_driver_rating_score(None)
+
+    def test_get_driver_review_aggregates_empty(self):
+        from drivers.services import get_driver_review_aggregates
+
+        self.assertEqual(get_driver_review_aggregates(None), (0, None))
+        cnt, avg = get_driver_review_aggregates(self.driver)
+        self.assertEqual(cnt, 0)
+        self.assertIsNone(avg)
+
+    def test_review_full_clean_rejects_wrong_driver(self):
+        other = Driver.objects.create(full_name="Other D", phone="+99890111002")
+        r = DriverDeliveryReview(order=self.order, driver=other, stars=3, comment="")
+        with self.assertRaises(ValidationError):
+            r.full_clean()
+
+    def test_comment_too_long_rejected(self):
+        r = self.client.post(
+            reverse("order-driver-review", args=[self.order.pk]),
+            {"stars": "5", "comment": "x" * 2001},
+        )
+        self.assertEqual(r.status_code, 302)
+        self.assertFalse(DriverDeliveryReview.objects.filter(order=self.order).exists())
+
+    def test_non_completed_order_review_blocked(self):
+        self.order.status = OrderStatus.NEW
+        self.order.save(update_fields=["status", "updated_at"])
+        r = self.client.post(
+            reverse("order-driver-review", args=[self.order.pk]),
+            {"stars": "5", "comment": ""},
+        )
+        self.assertEqual(r.status_code, 302)
+        self.assertFalse(DriverDeliveryReview.objects.filter(order=self.order).exists())

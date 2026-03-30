@@ -1,7 +1,8 @@
 import json
+import logging
 import re
 from urllib import request
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 
 from django.conf import settings
@@ -10,9 +11,11 @@ from django.core.cache import cache
 from django.utils import timezone
 from django.utils.html import escape
 
-from bot.models import TelegramMessageLog
+from bot.models import TelegramGroupConfig, TelegramMessageLog
 from drivers.models import Driver, DriverStatus, DriverVerificationStatus
 from orders.models import Order, OrderStatus, QuantityUnit
+
+logger = logging.getLogger(__name__)
 
 TRIP_MAP_WEBAPP_SIGN_SALT = "shofir-trip-map"
 
@@ -28,6 +31,7 @@ BTN_REPLY_HELP = "📋 Yordam"
 BTN_REPLY_WIZARD = "🧙 Tezkor menyu"
 BTN_REPLY_WIZARD_TAXI = "🚕 Tezkor menyu"
 BTN_REPLY_TRIP_MAP = "🗺 Reys xaritasi"
+BTN_REPLY_ADD_VEHICLE = "➕ Mashina qo‘shish"
 
 
 def driver_reply_button_aliases() -> dict[str, str]:
@@ -42,6 +46,7 @@ def driver_reply_button_aliases() -> dict[str, str]:
         BTN_REPLY_WIZARD: "/wizard",
         BTN_REPLY_WIZARD_TAXI: "/wizard",
         BTN_REPLY_TRIP_MAP: "/trip_map",
+        BTN_REPLY_ADD_VEHICLE: "/add_vehicle",
     }
 
 
@@ -51,11 +56,24 @@ def normalize_driver_reply_text(text: str) -> str:
     return driver_reply_button_aliases().get(t, t)
 
 
+def normalize_telegram_command_text(text: str) -> str:
+    """Tugma aliaslari, so‘ng Telegram /buyruq@BotName → /buyruq (klientlar standart qoidasi)."""
+    t = normalize_driver_reply_text((text or "").strip())
+    parts = t.split()
+    if not parts:
+        return t
+    first = parts[0]
+    if first.startswith("/") and "@" in first:
+        parts[0] = first.split("@", 1)[0]
+    return " ".join(parts)
+
+
 def driver_idle_reply_keyboard() -> dict:
     """Biriktirilmagan / bo‘sh vaqt: yordam va tezkor buyruqlar."""
     return {
         "keyboard": [
             [{"text": BTN_REPLY_HELP}, {"text": BTN_REPLY_WIZARD}],
+            [{"text": BTN_REPLY_ADD_VEHICLE}],
             [{"text": BTN_REPLY_SUMMARY}],
         ],
         "resize_keyboard": True,
@@ -73,6 +91,7 @@ def driver_assigned_reply_keyboard(*, webapp_url: str | None = None) -> dict:
         [{"text": BTN_REPLY_START}, trip_btn],
     ]
     rows.append([{"text": BTN_REPLY_HELP}])
+    rows.insert(-1, [{"text": BTN_REPLY_ADD_VEHICLE}])
     return {
         "keyboard": rows,
         "resize_keyboard": True,
@@ -90,6 +109,7 @@ def driver_in_transit_reply_keyboard(*, webapp_url: str | None = None) -> dict:
         [trip_btn],
         [{"text": BTN_REPLY_FINISH}],
     ]
+    rows.append([{"text": BTN_REPLY_ADD_VEHICLE}])
     return {
         "keyboard": rows,
         "resize_keyboard": True,
@@ -132,16 +152,63 @@ def _telegram_api_url(method: str) -> str:
     return f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/{method}"
 
 
-def send_order_to_group(order: Order) -> None:
-    if not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_GROUP_ID:
+def _telegram_chat_id_for_api(raw: str) -> str | int:
+    s = (raw or "").strip()
+    if not s:
+        return s
+    try:
+        return int(s)
+    except ValueError:
+        return s
+
+
+def _telegram_chats_equal(a: str | int, b: str) -> bool:
+    bs = (b or "").strip()
+    if not bs:
+        return False
+    try:
+        return int(str(a).strip()) == int(bs)
+    except ValueError:
+        return str(a).strip() == bs
+
+
+def _maybe_add_group_message_thread(body: dict, *, for_configured_group: bool) -> None:
+    if not for_configured_group:
         return
+    tid = getattr(settings, "TELEGRAM_GROUP_MESSAGE_THREAD_ID", None)
+    if tid is not None:
+        body["message_thread_id"] = tid
+
+
+def _resolve_group_target(group_type: str) -> tuple[str, int | None]:
+    cfg = TelegramGroupConfig.objects.filter(group_type=group_type, is_active=True).first()
+    if cfg:
+        return str(cfg.chat_id or "").strip(), cfg.message_thread_id
+    if group_type == TelegramGroupConfig.GroupType.ORDER_POST:
+        return str(getattr(settings, "TELEGRAM_GROUP_ID", "") or "").strip(), getattr(
+            settings, "TELEGRAM_GROUP_MESSAGE_THREAD_ID", None
+        )
+    if group_type == TelegramGroupConfig.GroupType.OPS_NOTIFY:
+        return str(getattr(settings, "TELEGRAM_OPS_GROUP_ID", "") or "").strip(), getattr(
+            settings, "TELEGRAM_OPS_GROUP_MESSAGE_THREAD_ID", None
+        )
+    return "", None
+
+
+def send_order_to_group(order: Order) -> bool:
+    target_chat_id, target_thread_id = _resolve_group_target(TelegramGroupConfig.GroupType.ORDER_POST)
+    if not settings.TELEGRAM_BOT_TOKEN or not target_chat_id:
+        logger.warning("send_order_to_group: TELEGRAM_BOT_TOKEN yoki order post guruhi bo'sh")
+        return False
     text = build_order_text(order)
     body = {
-        "chat_id": settings.TELEGRAM_GROUP_ID,
+        "chat_id": _telegram_chat_id_for_api(str(target_chat_id)),
         "text": text,
         "parse_mode": "HTML",
         "reply_markup": build_order_keyboard(order),
     }
+    if target_thread_id is not None:
+        body["message_thread_id"] = target_thread_id
     payload = json.dumps(body).encode("utf-8")
     req = request.Request(
         _telegram_api_url("sendMessage"),
@@ -149,11 +216,19 @@ def send_order_to_group(order: Order) -> None:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with request.urlopen(req, timeout=10) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    try:
+        with request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        logger.error("send_order_to_group HTTP %s: %s", exc.code, detail)
+        return False
+    except URLError as exc:
+        logger.error("send_order_to_group tarmoq: %s", exc)
+        return False
     if data.get("ok"):
         result = data.get("result", {})
-        chat_id_value = str(result.get("chat", {}).get("id", settings.TELEGRAM_GROUP_ID))
+        chat_id_value = str(result.get("chat", {}).get("id", target_chat_id))
         message_id_value = str(result.get("message_id", ""))
         TelegramMessageLog.objects.create(
             order=order,
@@ -173,6 +248,86 @@ def send_order_to_group(order: Order) -> None:
                 )
             except Exception:
                 pass
+        return True
+    logger.error("send_order_to_group Telegram ok=false: %s", data)
+    return False
+
+
+def send_ops_notification(
+    event: str,
+    *,
+    order: Order | None = None,
+    driver: Driver | None = None,
+    note: str = "",
+) -> bool:
+    """
+    Dispetcher/ops uchun alohida Telegram guruhga tezkor xabarnoma.
+    TELEGRAM_OPS_GROUP_ID bo'sh bo'lsa jim o'tkaziladi.
+    """
+    ops_group_id, ops_thread_id = _resolve_group_target(TelegramGroupConfig.GroupType.OPS_NOTIFY)
+    if not settings.TELEGRAM_BOT_TOKEN or not ops_group_id:
+        return False
+
+    event_titles = {
+        "order_created": "🆕 Buyurtma yaratildi",
+        "driver_offer_accept": "✅ Haydovchi qabul qildi",
+        "driver_offer_reject": "❌ Haydovchi rad etdi",
+        "driver_offer_issue": "⚠️ Haydovchi muammo yubordi",
+        "trip_started": "🚛 Safar boshlandi",
+        "finish_requested": "📝 Tugatish so‘rovi yuborildi",
+        "driver_loaded_quantity": "🛢️ Yuklangan hajm kiritildi",
+        "driver_delivered_quantity": "📤 Topshirilgan hajm kiritildi",
+    }
+    title = event_titles.get(event, f"ℹ️ Hodisa: {event}")
+    lines = [f"<b>{title}</b>"]
+    if order:
+        lines.append(f"Buyurtma: <b>#{order.pk}</b>")
+        lines.append(f"Holat: {escape(order.get_status_display())}")
+        lines.append(f"Yo‘nalish: {escape(str(order.from_location))} → {escape(str(order.to_location))}")
+    if driver:
+        lines.append(f"Haydovchi: <b>{escape(driver.full_name)}</b>")
+        if driver.phone:
+            lines.append(f"Tel: {escape(driver.phone)}")
+    if note:
+        lines.append(f"Izoh: {escape(note)}")
+    body = {
+        "chat_id": _telegram_chat_id_for_api(ops_group_id),
+        "text": "\n".join(lines),
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if ops_thread_id is not None:
+        body["message_thread_id"] = ops_thread_id
+    payload = json.dumps(body).encode("utf-8")
+    req = request.Request(
+        _telegram_api_url("sendMessage"),
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        logger.error("send_ops_notification HTTP %s: %s", exc.code, detail)
+        return False
+    except URLError as exc:
+        logger.error("send_ops_notification tarmoq: %s", exc)
+        return False
+
+    if data.get("ok"):
+        result = data.get("result", {})
+        TelegramMessageLog.objects.create(
+            order=order,
+            chat_id=str(result.get("chat", {}).get("id", ops_group_id)),
+            message_id=str(result.get("message_id", "")),
+            event="ops_notification",
+            payload={"event": event, "driver_id": driver.pk if driver else None, "note": note},
+        )
+        return True
+    logger.error("send_ops_notification Telegram ok=false: %s", data)
+    return False
 
 
 def build_order_text(order: Order) -> str:
@@ -249,23 +404,8 @@ def build_order_keyboard(order: Order) -> dict:
             ]
         )
 
-    # Haydovchini biriktirish faqat web-panelda (Telegramda dispetcher oqimi yo‘q).
+    # Haydovchini biriktirish va boshqa ofis amallari faqat web-panelda.
     return {"inline_keyboard": keyboard}
-
-
-def _get_assign_candidates(order: Order) -> list[Driver]:
-    # Ro'yxatga imkon qadar ko'proq nomzod ko'rsatamiz (sig'im bo'yicha filtr).
-    # Yakuniy bloklash (hujjat expired va/yoki mos emas) accept paytida `_can_driver_take_order`
-    # va `_driver_has_expired_documents` ichida qilinadi.
-    return list(
-        Driver.objects.filter(
-            verification_status=DriverVerificationStatus.APPROVED,
-            status=DriverStatus.AVAILABLE,
-            vehicles__capacity_ton__gte=order.weight_ton,
-        )
-        .distinct()
-        .order_by("full_name")[:3]
-    )
 
 
 def answer_callback_query(callback_query_id: str, text: str = "") -> None:
@@ -295,10 +435,14 @@ def send_chat_message(
 ) -> None:
     if not settings.TELEGRAM_BOT_TOKEN or not chat_id:
         return
+    gid = str(settings.TELEGRAM_GROUP_ID or "").strip()
     body = {
-        "chat_id": chat_id,
+        "chat_id": _telegram_chat_id_for_api(str(chat_id)),
         "text": text,
     }
+    _maybe_add_group_message_thread(
+        body, for_configured_group=_telegram_chats_equal(chat_id, gid)
+    )
     if parse_mode:
         body["parse_mode"] = parse_mode
     if reply_markup:
@@ -312,8 +456,13 @@ def send_chat_message(
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with request.urlopen(req, timeout=10):
-        pass
+    try:
+        with request.urlopen(req, timeout=10):
+            pass
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        logger.error("Telegram sendMessage HTTP %s: %s", exc.code, detail)
+        raise
 
 
 def _telegram_api_post(method: str, body: dict) -> None:
@@ -395,11 +544,15 @@ def edit_chat_message(
 ) -> None:
     if not settings.TELEGRAM_BOT_TOKEN or not chat_id or not message_id:
         return
+    gid = str(settings.TELEGRAM_GROUP_ID or "").strip()
     body = {
-        "chat_id": chat_id,
+        "chat_id": _telegram_chat_id_for_api(str(chat_id)),
         "message_id": int(message_id),
         "text": text,
     }
+    _maybe_add_group_message_thread(
+        body, for_configured_group=_telegram_chats_equal(chat_id, gid)
+    )
     if parse_mode:
         body["parse_mode"] = parse_mode
     if reply_markup:
@@ -606,12 +759,13 @@ def edit_group_message(chat_id: str, message_id: str, order: Order) -> None:
     if not settings.TELEGRAM_BOT_TOKEN or not chat_id or not message_id:
         return
     body = {
-        "chat_id": chat_id,
+        "chat_id": _telegram_chat_id_for_api(str(chat_id)),
         "message_id": int(message_id),
         "text": build_order_text(order),
         "parse_mode": "HTML",
         "reply_markup": build_order_keyboard(order),
     }
+    _maybe_add_group_message_thread(body, for_configured_group=True)
     payload = json.dumps(body).encode("utf-8")
     req = request.Request(
         _telegram_api_url("editMessageText"),
@@ -621,69 +775,6 @@ def edit_group_message(chat_id: str, message_id: str, order: Order) -> None:
     )
     with request.urlopen(req, timeout=10):
         pass
-
-
-def build_dispatcher_panel_keyboard() -> dict:
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "🆕 Yangi buyurtmalar", "callback_data": "ui:orders:new:1"},
-                {"text": "✅ Biriktirilgan", "callback_data": "ui:orders:assigned:1"},
-            ],
-            [
-                {"text": "🚛 Yo‘lda", "callback_data": "ui:orders:in_transit:1"},
-                {"text": "🟢 Bo‘sh haydovchilar", "callback_data": "ui:drivers:available"},
-            ],
-            [
-                {"text": "📋 Admin buyruqlari", "callback_data": "ui:audit:dispatcher:10"},
-                {"text": "🔗 Callback jurnali", "callback_data": "ui:audit:callbacks:10"},
-            ],
-        ]
-    }
-
-
-def build_pager_keyboard(mode: str, status: str, page_num: int) -> dict:
-    prev_page = max(1, page_num - 1)
-    next_page = page_num + 1
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "⬅️ Oldingi sahifa", "callback_data": f"ui:{mode}:{status}:{prev_page}"},
-                {"text": "Keyingi sahifa ➡️", "callback_data": f"ui:{mode}:{status}:{next_page}"},
-            ],
-            [{"text": "🏠 Bosh panel", "callback_data": "ui:home"}],
-        ]
-    }
-
-
-def build_order_detail_keyboard(order: Order) -> dict:
-    rows = [
-        [
-            {"text": "🔄 Ma’lumotni yangilash", "callback_data": f"ord:refresh:{order.pk}"},
-            {"text": "👤 Haydovchini tanlash", "callback_data": f"ord:assign_menu:{order.pk}"},
-        ]
-    ]
-    if order.status in {OrderStatus.ASSIGNED, OrderStatus.IN_TRANSIT, OrderStatus.ISSUE}:
-        rows.append([{"text": "↩️ Haydovchini ajratish", "callback_data": f"ord:unassign:{order.pk}"}])
-    rows.append([{"text": "🏠 Bosh panel", "callback_data": "ui:home"}])
-    return {"inline_keyboard": rows}
-
-
-def build_assign_candidates_keyboard(order: Order) -> dict:
-    drivers = _get_assign_candidates(order)
-    rows = []
-    for driver in drivers:
-        eta, rating = _driver_eta_and_rating(driver)
-        rows.append(
-            [
-                {
-                    "text": f"{driver.full_name} | ETA {eta}m | ⭐{rating}",
-                    "callback_data": f"ord:assign:{order.pk}:{driver.pk}",
-                }
-            ]
-        )
-    rows.append([{"text": "⬅️ Buyurtmaga qaytish", "callback_data": f"ord:refresh:{order.pk}"}])
-    return {"inline_keyboard": rows}
 
 
 def build_driver_wizard_keyboard(
@@ -720,26 +811,6 @@ def build_driver_wizard_keyboard(
             ],
         ]
     }
-
-
-def build_driver_review_keyboard(order_id: int, driver_id: int) -> dict:
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "✅ Tasdiqlash", "callback_data": f"review:{order_id}:{driver_id}:approve"},
-                {"text": "❌ Rad etish", "callback_data": f"review:{order_id}:{driver_id}:decline"},
-            ]
-        ]
-    }
-
-
-def _driver_eta_and_rating(driver: Driver) -> tuple[int, str]:
-    snap = driver.performance_snapshots.order_by("-period_year", "-period_month").first()
-    if not snap:
-        return 0, "0.0"
-    eta = int(snap.avg_delivery_time_minutes or 0)
-    rating = f"{snap.rating_score:.1f}"
-    return eta, rating
 
 
 def _humanize_location(raw_value: str) -> str:

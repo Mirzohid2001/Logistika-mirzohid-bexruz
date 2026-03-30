@@ -32,6 +32,8 @@ Load balancer yoki Kubernetes probe sifatida `/health/` ishlatiladi. Prometheus 
 
 Alohicha **dispetcher** lavozimi yo‘q: barcha operatsiyani **admin** (`Owner` guruhi) boshqaradi. `Dispatcher` guruhi tarixiy moslik uchun qolgan; `setup_roles` uni Owner bilan **bir xil** ruxsatlar bilan to‘ldiradi. Yangi foydalanuvchilarni **Owner** ga qo‘shish tavsiya etiladi.
 
+**Telegram bot** faqat **haydovchilar** uchun; admin/dispatcher buyruqlari botda yo‘q — operatsiya **web-panel** orqali.
+
 ## Buxgalteriya / biznes switch’lar
 
 **Shofir standart biznes modeli:** klientlar platformaga to‘lamaydi; `client_price` / `gross_revenue` maydonlari texnik (yangi buyurtmalar uchun 0). Asosiy moliyaviy nazorat — haydovchi to‘lovi va ichki xarajatlar (yoqilg‘i, qo‘shimcha, jarima).

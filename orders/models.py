@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models import Sum
 from django.utils import timezone
 from decimal import Decimal
 import uuid
@@ -89,8 +90,10 @@ class Order(models.Model):
     )
     delivered_recorded_at = models.DateTimeField(null=True, blank=True)
     delivered_recorded_by = models.CharField(max_length=120, blank=True)
-    # Litr → massa: kg/L (masalan neft mahsuloti ~0.75–0.85). Litr kiritilganda ishlatiladi.
+    # Litr → massa: kg/L (masalan neft mahsuloti ~0.75–0.85). Yuklangan hajm litrida.
     density_kg_per_liter = models.DecimalField(max_digits=8, decimal_places=4, null=True, blank=True)
+    # Klientga topshirilgan hajm litrida — alohida zichlik (harorat va h.k.); bo‘sh bo‘lsa yuqoridagi ishlatiladi.
+    delivered_density_kg_per_liter = models.DecimalField(max_digits=8, decimal_places=4, null=True, blank=True)
     pickup_time = models.DateTimeField()
     actual_start_at = models.DateTimeField(null=True, blank=True)
     sla_deadline_at = models.DateTimeField(null=True, blank=True)
@@ -137,7 +140,13 @@ class Order(models.Model):
             - Decimal(self.fuel_cost or 0)
             - Decimal(self.extra_cost or 0)
             - Decimal(self.penalty_amount or 0)
+            - self.additional_expense_total
         )
+
+    @property
+    def additional_expense_total(self) -> Decimal:
+        raw = self.additional_expenses.aggregate(total=Sum("amount")).get("total") or Decimal("0")
+        return Decimal(str(raw)).quantize(Decimal("0.01"))
 
     @property
     def margin_percent(self) -> Decimal:
@@ -164,10 +173,11 @@ class Order(models.Model):
 
         if self.delivered_quantity is None:
             return None
+        eff = self.delivered_density_kg_per_liter or self.density_kg_per_liter
         return quantity_to_metric_tonnes(
             self.delivered_quantity,
             self.delivered_quantity_uom,
-            density_kg_per_liter=self.density_kg_per_liter,
+            density_kg_per_liter=eff,
         )
 
     @property
@@ -184,6 +194,72 @@ class Order(models.Model):
 
         planned = Decimal(self.weight_ton or 0)
         return shortage_tonnes(planned, self.delivered_quantity_metric_ton)
+
+
+class OrderSeal(models.Model):
+    """Tanker bo‘limi muhri: yuklash / tushirish raqamlari va buzilish qaydi."""
+
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="seals")
+    compartment = models.CharField(
+        max_length=80,
+        blank=True,
+        verbose_name="Bo‘lim",
+        help_text="Masalan: 1, Old, O‘ng",
+    )
+    seal_number_loading = models.CharField(
+        max_length=160,
+        verbose_name="Muhr (yuklash)",
+        help_text="Zavod / yuklash paytidagi muhr raqami",
+    )
+    seal_number_unloading = models.CharField(
+        max_length=160,
+        blank=True,
+        verbose_name="Muhr (tushirish)",
+        help_text="Klientda ko‘rilgan muhr (almashtirilgan bo‘lsa — yangi raqam)",
+    )
+    loading_recorded_at = models.DateTimeField(default=timezone.now)
+    loading_recorded_by = models.CharField(max_length=120, blank=True)
+    unloading_recorded_at = models.DateTimeField(null=True, blank=True)
+    unloading_recorded_by = models.CharField(max_length=120, blank=True)
+    is_broken = models.BooleanField(default=False, verbose_name="Muhr buzilgan")
+    broken_at = models.DateTimeField(null=True, blank=True)
+    broken_note = models.TextField(blank=True, verbose_name="Buzilish izohi")
+    broken_recorded_by = models.CharField(max_length=120, blank=True)
+    sort_order = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sort_order", "pk"]
+        verbose_name = "Buyurtma muhr"
+        verbose_name_plural = "Buyurtma muhrlari"
+
+    def __str__(self) -> str:
+        return f"#{self.order_id} {self.compartment or '—'} {self.seal_number_loading}"
+
+
+class OrderExtraExpense(models.Model):
+    class ExpenseCategory(models.TextChoices):
+        FUEL = "fuel", "Yoqilg‘i"
+        TOLL = "toll", "Yo‘l to‘lovi"
+        PARKING = "parking", "Parkovka"
+        REPAIR = "repair", "Ta’mir"
+        LOADER = "loader", "Yuklash/tushirish xizmati"
+        OTHER = "other", "Boshqa"
+
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="additional_expenses")
+    category = models.CharField(max_length=20, choices=ExpenseCategory.choices, default=ExpenseCategory.OTHER)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    note = models.CharField(max_length=255, blank=True)
+    incurred_at = models.DateTimeField(default=timezone.now)
+    recorded_by = models.CharField(max_length=120, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-incurred_at", "-id"]
+
+    def __str__(self) -> str:
+        return f"#{self.order_id} {self.get_category_display()} {self.amount}"
 
 
 class OrderStateLog(models.Model):

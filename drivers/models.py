@@ -1,3 +1,5 @@
+from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
 
@@ -39,6 +41,47 @@ class Driver(models.Model):
 
     def __str__(self) -> str:
         return self.full_name
+
+
+class DriverDeliveryReview(models.Model):
+    """Yuk yetkazilgach shofyor haqida yulduz va matnli fikr (reyting asosida)."""
+
+    order = models.OneToOneField(
+        "orders.Order",
+        on_delete=models.CASCADE,
+        related_name="driver_review",
+    )
+    driver = models.ForeignKey(Driver, on_delete=models.CASCADE, related_name="delivery_reviews")
+    stars = models.PositiveSmallIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+        help_text="1–5 yulduz",
+    )
+    comment = models.TextField(blank=True)
+    recorded_by_username = models.CharField(max_length=150, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Shofyor yetkazib berish sharhi"
+        verbose_name_plural = "Shofyor yetkazib berish sharhlari"
+
+    def __str__(self) -> str:
+        return f"#{self.order_id} {self.driver_id} ({self.stars}★)"
+
+    def clean(self) -> None:
+        super().clean()
+        if not self.order_id or not self.driver_id:
+            return
+        from dispatch.models import Assignment
+
+        link = Assignment.objects.filter(order_id=self.order_id).first()
+        if link is None:
+            raise ValidationError({"order": "Bu buyurtmada haydovchi biriktirilmagan."})
+        if link.driver_id != self.driver_id:
+            raise ValidationError(
+                {"driver": "Tanlangan shofyor buyurtmadagi biriktirish bilan mos kelmaydi."}
+            )
 
 
 class Vehicle(models.Model):

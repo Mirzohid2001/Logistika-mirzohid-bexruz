@@ -2,29 +2,6 @@
 Telegram foydalanuvchilariga chiqadigan matnlar (o‘zbekcha, qisqa va aniq).
 """
 
-DISPATCHER_START = (
-    "👋 <b>Shofir — admin (ofis)</b>\n\n"
-    "Buyurtmalar, haydovchilar va audit — pastdagi tugmalar yoki buyruqlar orqali.\n\n"
-    "Tezkor: <code>/panel</code> · Yordam: <code>/help</code>"
-)
-
-DISPATCHER_HELP = (
-    "<b>📋 Admin (ofis) buyruqlari</b>\n\n"
-    "<b>Asosiy</b>\n"
-    "• <code>/start</code> yoki <code>/panel</code> — boshqaruv paneli\n"
-    "• <code>/orders</code> [holat] [sahifa] — buyurtmalar ro‘yxati\n"
-    "• <code>/order</code> &lt;id&gt; — batafsil + tugmalar\n"
-    "• <code>/drivers</code> [holat] — haydovchilar\n\n"
-    "<b>Biriktirish</b>\n"
-    "• <code>/assign</code> &lt;buyurtma_id&gt; &lt;haydovchi_id&gt;\n"
-    "• <code>/unassign</code> &lt;buyurtma_id&gt;\n\n"
-    "<b>Audit va xavfli amallar</b>\n"
-    "• <code>/audit</code> [callbacks|admin] [limit]\n"
-    "• <code>/cancel</code> / <code>/reprice</code> / <code>/refund</code> — tasdiqlash kodi beriladi\n"
-    "• <code>/confirm</code> &lt;kod&gt;\n\n"
-    "<i>Guruhda buyurtma xabarlaridagi tugmalardan ham ishlatishingiz mumkin.</i>"
-)
-
 DRIVER_HELP = (
     "<b>🚚 Haydovchi buyruqlari</b>\n\n"
     "<b>Pastdagi tugmalar</b> (reply-klaviatura) xuddi shu buyruqlarning o‘rnini bosadi: "
@@ -39,6 +16,7 @@ DRIVER_HELP = (
     "(pin bosilganda ko‘pincha tashqi xarita ochiladi). Yandex havolalari — ixtiyoriy "
     "(<code>TRIP_MAP_SHOW_YANDEX_LINKS</code>)\n"
     "• <code>/wizard</code> — tezkor qadamlar (yo‘lda emas bo‘lsa)\n"
+    "• <code>/add_vehicle</code> — yangi mashina qo‘shish (davlat raqami + sig‘im)\n"
     "• <code>/start_trip</code> [buyurtma_id] — safarni boshlash (xabar ichida "
     "<b>xarita havolalari</b> chiqadi — bosganda Yandex ochiladi; koordinata "
     "<code>lat, lon</code> buyurtmada bo‘lsa marshrut ham bo‘ladi)\n"
@@ -49,10 +27,6 @@ DRIVER_HELP = (
     "📎 → Location → <b>Share Live Location</b> (muddat — reys oxirigacha). "
     "Yoki «📍 GPS (bir marta)». Admin webda Live flot va buyurtma xaritasida ko‘radi."
 )
-
-DISPATCHER_PANEL_TITLE = "<b>🎛 Boshqaruv paneli</b>\nQuyidagilardan birini tanlang:"
-
-UI_HOME_TITLE = DISPATCHER_PANEL_TITLE
 
 ORDER_NOT_FOUND = "Buyurtma topilmadi."
 
@@ -72,13 +46,6 @@ DRIVER_HELP_IN_TRANSIT = (
 )
 
 REGISTER_FIRST = "Avval <code>/start</code> ni bosing va telefon raqamingizni ulang."
-
-# Admin (ofis) Telegram orqali boshqarmaydi — faqat web
-BOT_DRIVER_ONLY_NOTICE = (
-    "🚚 <b>Bu bot faqat haydovchilar uchun.</b>\n\n"
-    "Adminlar barcha buyurtmalar, biriktirish va hisobotlar uchun "
-    "<b>web-panel</b>dan foydalanadilar."
-)
 
 WEB_ONLY_ACTION = (
     "🔒 Bu amal faqat <b>web-panel</b> orqali: admin akkaunti bilan kiring."

@@ -660,7 +660,18 @@ def _live_fleet_payload() -> dict:
 
     markers = []
     missing_live = []
-    stale_before = timezone.now() - timedelta(minutes=10)
+    now = timezone.now()
+    stale_sec = int(getattr(dj_settings, "FLEET_LIVE_STALE_SEC", 600) or 600)
+    stale_before = now - timedelta(seconds=stale_sec)
+    no_live_alert_order_ids = set(
+        AlertEvent.objects.filter(
+            alert_type=AlertType.NO_LIVE_TRACK,
+            resolved=False,
+            order_id__in=order_ids,
+        )
+        .exclude(order_id__isnull=True)
+        .values_list("order_id", flat=True)
+    )
     for o in orders:
         rows = by_order.get(o.pk)
         if not rows:
@@ -670,6 +681,7 @@ def _live_fleet_payload() -> dict:
                     "status": o.get_status_display(),
                     "from_short": (o.from_location or "")[:48],
                     "to_short": (o.to_location or "")[:48],
+                    "no_live_alert_open": o.pk in no_live_alert_order_ids,
                 }
             )
             continue
@@ -678,6 +690,7 @@ def _live_fleet_payload() -> dict:
         trail = [{"lat": float(r["latitude"]), "lon": float(r["longitude"])} for r in trail_chrono]
         did = latest.get("driver_id")
         cap = latest["captured_at"]
+        age_sec = max(0, int((now - cap).total_seconds())) if hasattr(cap, "__lt__") else None
         is_stale = bool(cap < stale_before) if hasattr(cap, "__lt__") else False
         markers.append(
             {
@@ -686,6 +699,7 @@ def _live_fleet_payload() -> dict:
                 "lat": float(latest["latitude"]),
                 "lon": float(latest["longitude"]),
                 "captured_at": cap.isoformat() if hasattr(cap, "isoformat") else str(cap),
+                "age_sec": age_sec,
                 "status": o.status,
                 "status_label": o.get_status_display(),
                 "is_stale": is_stale,
@@ -703,6 +717,7 @@ def _live_fleet_payload() -> dict:
             "with_live": len(markers),
             "without_live": len(missing_live),
             "stale_live": len([m for m in markers if m.get("is_stale")]),
+            "no_live_alert_open": len([m for m in missing_live if m.get("no_live_alert_open")]),
         },
     }
 

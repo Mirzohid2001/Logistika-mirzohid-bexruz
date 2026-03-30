@@ -5,6 +5,7 @@ from django.contrib.auth.models import Group, User
 from django.urls import reverse
 import tempfile
 import os
+from unittest.mock import patch
 
 from dispatch.models import Assignment
 from drivers.models import Driver, DriverStatus
@@ -12,7 +13,19 @@ from decimal import Decimal
 from bot.models import TelegramMessageLog
 from analytics.models import AlertEvent, AlertType
 
-from orders.models import Client, ContractTariff, Order, OrderStatus, PaymentLedger, PaymentStatus, PaymentTerms, QuantityUnit, RevenueLedger
+from orders.models import (
+    Client,
+    ContractTariff,
+    Order,
+    OrderExtraExpense,
+    OrderSeal,
+    OrderStatus,
+    PaymentLedger,
+    PaymentStatus,
+    PaymentTerms,
+    QuantityUnit,
+    RevenueLedger,
+)
 from orders.quantity import quantity_to_metric_tonnes, shortage_tonnes
 from orders.services import apply_client_contract, create_return_trip, split_shipment, transition_order
 
@@ -39,6 +52,25 @@ class OrderQuantityCustodyTests(TestCase):
         self.assertEqual(order.loaded_quantity_metric_ton, Decimal("10"))
         self.assertEqual(order.delivered_quantity_metric_ton, Decimal("9.5000"))
         self.assertEqual(order.quantity_shortage_metric_ton, Decimal("0.5000"))
+
+    def test_delivered_liter_uses_delivered_density_then_fallback(self):
+        order = Order.objects.create(
+            from_location="A",
+            to_location="B",
+            cargo_type="Diesel",
+            weight_ton="10.00",
+            pickup_time=timezone.now(),
+            contact_name="U",
+            contact_phone="+1",
+            density_kg_per_liter=Decimal("0.80"),
+            delivered_quantity=Decimal("10000"),
+            delivered_quantity_uom=QuantityUnit.LITER,
+            delivered_density_kg_per_liter=Decimal("0.84"),
+        )
+        self.assertEqual(order.delivered_quantity_metric_ton, Decimal("8.4000"))
+        order.delivered_density_kg_per_liter = None
+        order.save(update_fields=["delivered_density_kg_per_liter"])
+        self.assertEqual(order.delivered_quantity_metric_ton, Decimal("8.0000"))
 
 
 class OrderFinanceTests(TestCase):
@@ -261,6 +293,100 @@ class OrderDomainDeepeningTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(Order.objects.filter(parent_order=self.order).count(), 2)
 
+    def test_order_seal_add_update_delete(self):
+        r = self.client.post(
+            reverse("order-seal-add", args=[self.order.pk]),
+            {"compartment": "Old", "seal_number_loading": "PL-999"},
+        )
+        self.assertEqual(r.status_code, 302)
+        seal = OrderSeal.objects.get(order=self.order)
+        self.assertEqual(seal.seal_number_loading, "PL-999")
+        self.assertTrue((seal.loading_recorded_by or "").startswith("web:"))
+        self.assertEqual((seal.seal_number_unloading or "").strip(), "")
+
+        pfx = f"seal{seal.pk}"
+        r2 = self.client.post(
+            reverse("order-seal-update", args=[self.order.pk, seal.pk]),
+            {f"{pfx}-seal_number_unloading": "PL-999"},
+        )
+        self.assertEqual(r2.status_code, 302)
+        seal.refresh_from_db()
+        self.assertEqual(seal.seal_number_unloading, "PL-999")
+        self.assertIsNotNone(seal.unloading_recorded_at)
+
+        r3 = self.client.post(
+            reverse("order-seal-update", args=[self.order.pk, seal.pk]),
+            {
+                f"{pfx}-seal_number_unloading": "PL-999",
+                f"{pfx}-is_broken": "on",
+                f"{pfx}-broken_note": "Plomba buzilgan",
+            },
+        )
+        self.assertEqual(r3.status_code, 302)
+        seal.refresh_from_db()
+        self.assertTrue(seal.is_broken)
+        self.assertIsNotNone(seal.broken_at)
+
+        r4 = self.client.post(reverse("order-seal-delete", args=[self.order.pk, seal.pk]))
+        self.assertEqual(r4.status_code, 302)
+        self.assertFalse(OrderSeal.objects.filter(pk=seal.pk).exists())
+
+    def test_order_extra_expense_add_and_total(self):
+        response = self.client.post(
+            reverse("order-expense-add", args=[self.order.pk]),
+            {
+                "category": "toll",
+                "amount": "125000",
+                "note": "Post to'lovi",
+                "incurred_at": "2026-03-30T10:30",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        exp = OrderExtraExpense.objects.get(order=self.order)
+        self.assertEqual(exp.category, "toll")
+        self.assertEqual(str(exp.amount), "125000.00")
+        self.order.refresh_from_db()
+        self.assertEqual(str(self.order.additional_expense_total), "125000.00")
+
+    @patch("orders.views.send_chat_message")
+    def test_order_live_reminder_sends_driver_message_and_logs_event(self, send_chat_message_mock):
+        driver = Driver.objects.create(
+            full_name="Live Driver",
+            phone="+998901234000",
+            status=DriverStatus.BUSY,
+            telegram_user_id=123456789,
+        )
+        Assignment.objects.create(order=self.order, driver=driver, assigned_by="dispatcher")
+        self.order.status = OrderStatus.IN_TRANSIT
+        self.order.save(update_fields=["status", "updated_at"])
+
+        response = self.client.post(reverse("order-live-reminder", args=[self.order.pk]))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("order-detail", args=[self.order.pk]))
+        send_chat_message_mock.assert_called_once()
+        self.assertTrue(
+            TelegramMessageLog.objects.filter(order=self.order, event="driver_live_reminder_manual").exists()
+        )
+
+    @patch("orders.views.send_chat_message")
+    def test_order_live_reminder_skips_when_order_not_in_transit(self, send_chat_message_mock):
+        driver = Driver.objects.create(
+            full_name="Idle Driver",
+            phone="+998901234001",
+            status=DriverStatus.AVAILABLE,
+            telegram_user_id=987654321,
+        )
+        Assignment.objects.create(order=self.order, driver=driver, assigned_by="dispatcher")
+        self.order.status = OrderStatus.ASSIGNED
+        self.order.save(update_fields=["status", "updated_at"])
+
+        response = self.client.post(reverse("order-live-reminder", args=[self.order.pk]))
+        self.assertEqual(response.status_code, 302)
+        send_chat_message_mock.assert_not_called()
+        self.assertFalse(
+            TelegramMessageLog.objects.filter(order=self.order, event="driver_live_reminder_manual").exists()
+        )
+
     def test_client_crud_endpoints(self):
         list_response = self.client.get(reverse("client-list"))
         self.assertEqual(list_response.status_code, 200)
@@ -398,7 +524,8 @@ class OrderDomainDeepeningTests(TestCase):
         self.assertEqual(self.order.status, OrderStatus.COMPLETED)
         self.assertEqual(self.order.shortage_kg, Decimal("100.000"))
         self.assertEqual(self.order.shortage_penalty_points, 5)
-        self.assertEqual(driver.rating_score, Decimal("91.00"))
+        # Reyting: sharh yo‘q → asos 100; kamomad jarimasi 5 ball → 95
+        self.assertEqual(driver.rating_score, Decimal("95.00"))
         self.assertTrue(
             AlertEvent.objects.filter(order=self.order, alert_type=AlertType.FUEL_SHORTAGE, resolved=False).exists()
         )

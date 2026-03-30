@@ -9,7 +9,7 @@ from django.test.utils import override_settings
 from unittest.mock import MagicMock, patch
 
 from analytics.models import AlertEvent, AlertType
-from bot.copy_uz import BOT_DRIVER_ONLY_NOTICE
+from bot.copy_uz import REGISTER_FIRST
 from bot.services import (
     build_active_trip_focus_message_html,
     build_order_keyboard,
@@ -17,6 +17,7 @@ from bot.services import (
     build_start_trip_driver_message_html,
     driver_reply_keyboard_for_order,
     normalize_driver_reply_text,
+    normalize_telegram_command_text,
     TRIP_MAP_WEBAPP_SIGN_SALT,
 )
 from dispatch.models import DriverOfferApproval, DriverOfferDecision, DriverOfferResponse
@@ -24,9 +25,17 @@ from bot.tasks import reverse_geocode_yandex_task, update_order_telegram_text_ta
 from bot.models import TelegramMessageLog
 from dispatch.models import Assignment
 from drivers.models import Driver, DriverStatus, Vehicle
-from orders.models import Order, OrderStatus
+from orders.models import Order, OrderStatus, QuantityUnit
+from bot.models import DriverOnboardingState
 from django.core.cache import cache
 from tracking.models import LocationPing, LocationSource
+
+
+class NormalizeTelegramCommandTests(TestCase):
+    def test_strips_bot_username_from_first_token(self) -> None:
+        self.assertEqual(normalize_telegram_command_text("/start@MyBot"), "/start")
+        self.assertEqual(normalize_telegram_command_text("/help@MyBot"), "/help")
+        self.assertEqual(normalize_telegram_command_text("/start@MyBot +998901112233"), "/start +998901112233")
 
 
 @override_settings(TELEGRAM_WEBHOOK_SECRET="")
@@ -43,7 +52,6 @@ class BotWebhookTests(TestCase):
             status=OrderStatus.NEW,
         )
 
-    @override_settings(DISPATCHER_TELEGRAM_USER_IDS=[777])
     @patch("bot.views.edit_group_message")
     @patch("bot.views.answer_callback_query")
     def test_driver_accept_callback_registers_pending_offer(self, _answer_callback_query, _edit_group_message):
@@ -139,7 +147,6 @@ class BotWebhookTests(TestCase):
         self.assertAlmostEqual(float(ping.latitude), 41.31, places=4)
         self.assertAlmostEqual(float(ping.longitude), 69.28, places=4)
 
-    @override_settings(DISPATCHER_TELEGRAM_USER_IDS=[777])
     @patch("bot.views.edit_group_message")
     @patch("bot.views.answer_callback_query")
     def test_assign_callback_from_telegram_is_web_only(self, answer_callback_query_mock, _edit_group_message):
@@ -175,7 +182,6 @@ class BotWebhookTests(TestCase):
         self.assertFalse(Assignment.objects.filter(order=self.order).exists())
         self.assertTrue(answer_callback_query_mock.called)
 
-    @override_settings(DISPATCHER_TELEGRAM_USER_IDS=[777])
     @patch("bot.views.edit_chat_message")
     @patch("bot.views.answer_callback_query")
     def test_ui_home_callback_is_web_only(self, answer_callback_query_mock, _edit_chat_message):
@@ -196,7 +202,6 @@ class BotWebhookTests(TestCase):
         self.assertEqual(TelegramMessageLog.objects.filter(event="callback").count(), 0)
         self.assertTrue(answer_callback_query_mock.called)
 
-    @override_settings(DISPATCHER_TELEGRAM_USER_IDS=[777])
     @patch("bot.views.edit_chat_message")
     @patch("bot.views.answer_callback_query")
     def test_ord_refresh_callback_is_web_only(self, answer_callback_query_mock, _edit_chat_message):
@@ -289,6 +294,27 @@ class BotWebhookTests(TestCase):
         self.assertTrue(TelegramMessageLog.objects.filter(event="driver_finish_requested").exists())
 
     @patch("bot.views.send_chat_message")
+    def test_start_with_bot_suffix_triggers_phone_prompt(self, send_chat_message_mock) -> None:
+        payload = {
+            "update_id": 991001,
+            "message": {
+                "message_id": 1,
+                "chat": {"id": 50001},
+                "from": {"id": 50001, "username": "user50001"},
+                "text": "/start@ShofirTestBot",
+            },
+        }
+        response = self.client.post(
+            reverse("telegram-webhook"),
+            data=payload,
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        send_chat_message_mock.assert_called()
+        _args, _kwargs = send_chat_message_mock.call_args
+        self.assertIn("Botga ulanish", _args[1])
+
+    @patch("bot.views.send_chat_message")
     def test_driver_yuklandi_command_saves_loaded_quantity(self, send_chat_message_mock):
         driver = Driver.objects.create(
             full_name="Qty Driver",
@@ -327,7 +353,9 @@ class BotWebhookTests(TestCase):
         )
         Assignment.objects.create(order=self.order, driver=driver, assigned_by="dispatcher")
         self.order.status = OrderStatus.ASSIGNED
-        self.order.save(update_fields=["status", "updated_at"])
+        self.order.loaded_quantity = Decimal("10.00")
+        self.order.loaded_quantity_uom = QuantityUnit.TON
+        self.order.save(update_fields=["status", "loaded_quantity", "loaded_quantity_uom", "updated_at"])
         start_payload = {
             "message": {
                 "message_id": 20,
@@ -344,6 +372,9 @@ class BotWebhookTests(TestCase):
         self.assertEqual(start_response.status_code, 200)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, OrderStatus.IN_TRANSIT)
+        self.order.delivered_quantity = Decimal("9.00")
+        self.order.delivered_quantity_uom = QuantityUnit.TON
+        self.order.save(update_fields=["delivered_quantity", "delivered_quantity_uom", "updated_at"])
 
         finish_payload = {
             "message": {
@@ -365,6 +396,164 @@ class BotWebhookTests(TestCase):
         self.assertEqual(self.order.status, OrderStatus.IN_TRANSIT)
         self.assertEqual(driver.status, DriverStatus.BUSY)
         self.assertEqual(TelegramMessageLog.objects.filter(event="driver_command").count(), 2)
+
+    @patch("bot.views.send_chat_message")
+    def test_start_trip_requires_loaded_quantity(self, send_chat_message_mock):
+        driver = Driver.objects.create(
+            full_name="No Load Driver",
+            phone="+998900000009",
+            telegram_user_id=445,
+            status=DriverStatus.BUSY,
+        )
+        Assignment.objects.create(order=self.order, driver=driver, assigned_by="dispatcher")
+        self.order.status = OrderStatus.ASSIGNED
+        self.order.loaded_quantity = None
+        self.order.loaded_quantity_uom = QuantityUnit.TON
+        self.order.save(update_fields=["status", "loaded_quantity", "loaded_quantity_uom", "updated_at"])
+
+        payload = {
+            "message": {
+                "message_id": 22,
+                "chat": {"id": 445},
+                "from": {"id": 445, "username": "d445"},
+                "text": "/start_trip",
+            }
+        }
+        response = self.client.post(
+            reverse("telegram-webhook"),
+            data=payload,
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, OrderStatus.ASSIGNED)
+        self.assertFalse(TelegramMessageLog.objects.filter(event="driver_finish_requested").exists())
+        self.assertEqual(TelegramMessageLog.objects.filter(event="driver_command").count(), 0)
+        self.assertTrue(send_chat_message_mock.called)
+
+    @patch("bot.views.send_chat_message")
+    @patch("bot.views.send_order_native_map_pins")
+    def test_start_trip_then_plain_quantity_auto_starts_trip(self, _pins_mock, send_chat_message_mock):
+        driver = Driver.objects.create(
+            full_name="Plain Start Driver",
+            phone="+998900000019",
+            telegram_user_id=449,
+            status=DriverStatus.BUSY,
+        )
+        Assignment.objects.create(order=self.order, driver=driver, assigned_by="dispatcher")
+        self.order.status = OrderStatus.ASSIGNED
+        self.order.loaded_quantity = None
+        self.order.save(update_fields=["status", "loaded_quantity", "updated_at"])
+
+        start_payload = {
+            "message": {
+                "message_id": 24,
+                "chat": {"id": 449},
+                "from": {"id": 449, "username": "d449"},
+                "text": "/start_trip",
+            }
+        }
+        self.client.post(reverse("telegram-webhook"), data=start_payload, content_type="application/json")
+        state = DriverOnboardingState.objects.get(telegram_user_id=449)
+        self.assertTrue(state.is_active)
+        self.assertEqual(state.step, "await_loaded_quantity")
+
+        plain_payload = {
+            "message": {
+                "message_id": 25,
+                "chat": {"id": 449},
+                "from": {"id": 449, "username": "d449"},
+                "text": "12000 kg",
+            }
+        }
+        response = self.client.post(reverse("telegram-webhook"), data=plain_payload, content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, OrderStatus.IN_TRANSIT)
+        self.assertEqual(self.order.loaded_quantity, Decimal("12000"))
+        self.assertEqual(self.order.loaded_quantity_uom, QuantityUnit.KG)
+        state.refresh_from_db()
+        self.assertFalse(state.is_active)
+        self.assertTrue(send_chat_message_mock.called)
+
+    @patch("bot.views.send_chat_message")
+    def test_finish_trip_requires_delivered_quantity(self, send_chat_message_mock):
+        driver = Driver.objects.create(
+            full_name="No Delivered Driver",
+            phone="+998900000010",
+            telegram_user_id=446,
+            status=DriverStatus.BUSY,
+        )
+        Assignment.objects.create(order=self.order, driver=driver, assigned_by="dispatcher")
+        self.order.status = OrderStatus.IN_TRANSIT
+        self.order.delivered_quantity = None
+        self.order.delivered_quantity_uom = QuantityUnit.TON
+        self.order.save(update_fields=["status", "delivered_quantity", "delivered_quantity_uom", "updated_at"])
+
+        payload = {
+            "message": {
+                "message_id": 23,
+                "chat": {"id": 446},
+                "from": {"id": 446, "username": "d446"},
+                "text": "/finish_trip",
+            }
+        }
+        response = self.client.post(
+            reverse("telegram-webhook"),
+            data=payload,
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, OrderStatus.IN_TRANSIT)
+        self.assertFalse(TelegramMessageLog.objects.filter(event="driver_finish_requested").exists())
+        self.assertEqual(TelegramMessageLog.objects.filter(event="driver_command").count(), 0)
+        self.assertTrue(send_chat_message_mock.called)
+
+    @patch("bot.views.send_chat_message")
+    def test_finish_trip_then_plain_quantity_auto_sends_finish_request(self, send_chat_message_mock):
+        driver = Driver.objects.create(
+            full_name="Plain Finish Driver",
+            phone="+998900000020",
+            telegram_user_id=450,
+            status=DriverStatus.BUSY,
+        )
+        Assignment.objects.create(order=self.order, driver=driver, assigned_by="dispatcher")
+        self.order.status = OrderStatus.IN_TRANSIT
+        self.order.delivered_quantity = None
+        self.order.save(update_fields=["status", "delivered_quantity", "updated_at"])
+
+        finish_payload = {
+            "message": {
+                "message_id": 26,
+                "chat": {"id": 450},
+                "from": {"id": 450, "username": "d450"},
+                "text": "/finish_trip",
+            }
+        }
+        self.client.post(reverse("telegram-webhook"), data=finish_payload, content_type="application/json")
+        state = DriverOnboardingState.objects.get(telegram_user_id=450)
+        self.assertTrue(state.is_active)
+        self.assertEqual(state.step, "await_delivered_quantity")
+
+        plain_payload = {
+            "message": {
+                "message_id": 27,
+                "chat": {"id": 450},
+                "from": {"id": 450, "username": "d450"},
+                "text": "11000 kg",
+            }
+        }
+        response = self.client.post(reverse("telegram-webhook"), data=plain_payload, content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, OrderStatus.IN_TRANSIT)
+        self.assertEqual(self.order.delivered_quantity, Decimal("11000"))
+        self.assertEqual(self.order.delivered_quantity_uom, QuantityUnit.KG)
+        self.assertTrue(TelegramMessageLog.objects.filter(order=self.order, event="driver_finish_requested").exists())
+        state.refresh_from_db()
+        self.assertFalse(state.is_active)
+        self.assertTrue(send_chat_message_mock.called)
 
     @patch("bot.views.send_chat_message")
     def test_driver_help_command(self, send_chat_message_mock):
@@ -392,6 +581,215 @@ class BotWebhookTests(TestCase):
         self.assertEqual(TelegramMessageLog.objects.filter(event="driver_command", payload__driver_id=driver.pk).count(), 0)
 
     @patch("bot.views.send_chat_message")
+    def test_start_prioritizes_in_transit_finish_keyboard(self, send_chat_message_mock):
+        driver = Driver.objects.create(
+            full_name="Transit Driver",
+            phone="+998900000012",
+            telegram_user_id=0,
+            status=DriverStatus.OFFLINE,
+        )
+        # Docs tekshiruvi uchun kamida bitta transport bo‘lishi kerak.
+        Vehicle.objects.create(
+            driver=driver,
+            plate_number="01A777AA",
+            vehicle_type="Tanker",
+            capacity_ton="12.00",
+        )
+
+        o_in = Order.objects.create(
+            from_location="Neft Zavodi",
+            to_location="Qarshi",
+            cargo_type="Neft",
+            weight_ton="10.00",
+            pickup_time=timezone.now(),
+            contact_name="Ali",
+            contact_phone="+998901112233",
+            status=OrderStatus.IN_TRANSIT,
+        )
+        o_assigned = Order.objects.create(
+            from_location="A",
+            to_location="B",
+            cargo_type="Gaz",
+            weight_ton="8.00",
+            pickup_time=timezone.now(),
+            contact_name="Vali",
+            contact_phone="+998901111111",
+            status=OrderStatus.ASSIGNED,
+        )
+        Assignment.objects.create(order=o_in, driver=driver, assigned_by="test")
+        Assignment.objects.create(order=o_assigned, driver=driver, assigned_by="test")
+
+        payload = {
+            "message": {
+                "message_id": 100,
+                "chat": {"id": 50001},
+                "from": {"id": 50001, "username": "tuser"},
+                "text": "/start +998900000012",
+            }
+        }
+        response = self.client.post(
+            reverse("telegram-webhook"),
+            data=payload,
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        driver.refresh_from_db()
+        self.assertEqual(driver.telegram_user_id, 50001)
+
+        # IN_TRANSIT fokusda — tugatish tugmasi chiqishi kerak.
+        found_finish = False
+        for call in send_chat_message_mock.call_args_list:
+            rm = call.kwargs.get("reply_markup")
+            if not rm:
+                continue
+            kb = rm.get("keyboard") or []
+            texts = [b.get("text") for row in kb for b in row if isinstance(b, dict)]
+            if any(t and "Tugatish" in str(t) for t in texts):
+                found_finish = True
+                break
+
+        self.assertTrue(found_finish)
+
+    @patch("bot.views.send_chat_message")
+    def test_start_without_phone_does_not_reset_trip(self, send_chat_message_mock):
+        driver = Driver.objects.create(
+            full_name="Connected Driver",
+            phone="+998900000013",
+            telegram_user_id=5555,
+            status=DriverStatus.AVAILABLE,
+            license_number="LIC-1",
+        )
+        # Docs OK bo‘lishi uchun kamida bitta vehicle kerak.
+        Vehicle.objects.create(
+            driver=driver,
+            plate_number="01A55555",
+            vehicle_type="Tanker",
+            capacity_ton="10.00",
+        )
+
+        order = Order.objects.create(
+            from_location="Neft Zavodi",
+            to_location="Qarshi",
+            cargo_type="Neft",
+            weight_ton="10.00",
+            pickup_time=timezone.now(),
+            contact_name="Ali",
+            contact_phone="+998901112233",
+            status=OrderStatus.IN_TRANSIT,
+        )
+        Assignment.objects.create(order=order, driver=driver, assigned_by="test")
+
+        # /start (telefon raqamisiz) bosiladi.
+        payload = {
+            "message": {
+                "message_id": 101,
+                "chat": {"id": 5555},
+                "from": {"id": 5555, "username": "connected"},
+                "text": "/start",
+            }
+        }
+        response = self.client.post(
+            reverse("telegram-webhook"),
+            data=payload,
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+        # "Botga ulanish" so‘rovi yana chiqmasligi kerak.
+        all_texts = []
+        for call in send_chat_message_mock.call_args_list:
+            if call.args and len(call.args) >= 2:
+                all_texts.append(str(call.args[1]))
+            if call.kwargs.get("text"):
+                all_texts.append(str(call.kwargs["text"]))
+        self.assertFalse(any("Botga ulanish" in t for t in all_texts))
+
+        # IN_TRANSIT fokusda Tugatish tugmasi ko‘rinishi kerak.
+        found_finish = False
+        for call in send_chat_message_mock.call_args_list:
+            rm = call.kwargs.get("reply_markup")
+            if not rm:
+                continue
+            kb = rm.get("keyboard") or []
+            texts = [b.get("text") for row in kb for b in row if isinstance(b, dict)]
+            if any(t and "Tugatish" in str(t) for t in texts):
+                found_finish = True
+                break
+        self.assertTrue(found_finish)
+
+    @patch("bot.views.send_chat_message")
+    def test_driver_add_vehicle_flow_creates_vehicle_and_keeps_driver_license(self, send_chat_message_mock):
+        driver = Driver.objects.create(
+            full_name="Vehicle Driver",
+            phone="+998900000010",
+            telegram_user_id=777,
+            status=DriverStatus.AVAILABLE,
+            license_number="LIC-1",
+        )
+
+        # 1) Boshlash: /add_vehicle
+        payload1 = {
+            "message": {
+                "message_id": 31,
+                "chat": {"id": 777},
+                "from": {"id": 777, "username": "veh777"},
+                "text": "/add_vehicle",
+            }
+        }
+        resp1 = self.client.post(
+            reverse("telegram-webhook"),
+            data=payload1,
+            content_type="application/json",
+        )
+        self.assertEqual(resp1.status_code, 200)
+        state = DriverOnboardingState.objects.get(telegram_user_id=777)
+        self.assertTrue(state.is_active)
+        self.assertEqual(state.step, "add_vehicle_plate")
+
+        # 2) Davlat raqami
+        payload2 = {
+            "message": {
+                "message_id": 32,
+                "chat": {"id": 777},
+                "from": {"id": 777, "username": "veh777"},
+                "text": "80A123BC",
+            }
+        }
+        resp2 = self.client.post(
+            reverse("telegram-webhook"),
+            data=payload2,
+            content_type="application/json",
+        )
+        self.assertEqual(resp2.status_code, 200)
+        state.refresh_from_db()
+        self.assertEqual(state.step, "add_vehicle_capacity")
+
+        # 3) Sig'im
+        payload3 = {
+            "message": {
+                "message_id": 33,
+                "chat": {"id": 777},
+                "from": {"id": 777, "username": "veh777"},
+                "text": "12.5",
+            }
+        }
+        resp3 = self.client.post(
+            reverse("telegram-webhook"),
+            data=payload3,
+            content_type="application/json",
+        )
+        self.assertEqual(resp3.status_code, 200)
+
+        state.refresh_from_db()
+        self.assertFalse(state.is_active)
+
+        vehicle = Vehicle.objects.get(driver=driver, plate_number="80A123BC")
+        self.assertEqual(vehicle.capacity_ton, Decimal("12.50"))
+
+        driver.refresh_from_db()
+        self.assertEqual(driver.license_number, "LIC-1")
+
+    @patch("bot.views.send_chat_message")
     def test_driver_command_with_explicit_order_id(self, _send_chat_message):
         driver = Driver.objects.create(
             full_name="Order Driver",
@@ -408,6 +806,8 @@ class BotWebhookTests(TestCase):
             contact_name="Vali",
             contact_phone="+998901111111",
             status=OrderStatus.ASSIGNED,
+            loaded_quantity=Decimal("5.00"),
+            loaded_quantity_uom=QuantityUnit.TON,
         )
         Assignment.objects.create(order=self.order, driver=driver, assigned_by="dispatcher")
         Assignment.objects.create(order=second_order, driver=driver, assigned_by="dispatcher")
@@ -652,231 +1052,16 @@ class BotWebhookTests(TestCase):
         self.assertNotIn(f"order:{self.order.pk}:accept", flattened)
         self.assertFalse(any(":assign:" in value for value in flattened))
 
-    @override_settings(DISPATCHER_TELEGRAM_USER_IDS=[777])
     @patch("bot.views.send_chat_message")
-    def test_dispatcher_orders_command_returns_list(self, send_chat_message_mock):
+    def test_non_driver_text_gets_register_first(self, send_chat_message_mock):
+        """Admin/dispatcher maxsus yo‘q: ro‘yxatdan o‘tmagan foydalanuvchi — REGISTER_FIRST."""
         payload = {
+            "update_id": 77001,
             "message": {
                 "message_id": 24,
                 "chat": {"id": 777},
-                "from": {"id": 777, "username": "dispatcher777"},
+                "from": {"id": 777, "username": "not_a_driver"},
                 "text": "/orders",
-            }
-        }
-        response = self.client.post(
-            reverse("telegram-webhook"),
-            data=payload,
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(send_chat_message_mock.called)
-        sent_text = send_chat_message_mock.call_args[0][1]
-        self.assertEqual(sent_text, BOT_DRIVER_ONLY_NOTICE)
-
-    @override_settings(DISPATCHER_TELEGRAM_USER_IDS=[777])
-    @patch("bot.views.send_chat_message")
-    def test_dispatcher_orders_command_with_status_filter(self, send_chat_message_mock):
-        self.order.status = OrderStatus.COMPLETED
-        self.order.save(update_fields=["status", "updated_at"])
-        payload = {
-            "message": {
-                "message_id": 25,
-                "chat": {"id": 777},
-                "from": {"id": 777, "username": "dispatcher777"},
-                "text": "/orders completed",
-            }
-        }
-        response = self.client.post(
-            reverse("telegram-webhook"),
-            data=payload,
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(send_chat_message_mock.called)
-        sent_text = send_chat_message_mock.call_args[0][1]
-        self.assertEqual(sent_text, BOT_DRIVER_ONLY_NOTICE)
-
-    @override_settings(DISPATCHER_TELEGRAM_USER_IDS=[777])
-    @patch("bot.views.send_chat_message")
-    def test_dispatcher_order_detail_command(self, send_chat_message_mock):
-        payload = {
-            "message": {
-                "message_id": 26,
-                "chat": {"id": 777},
-                "from": {"id": 777, "username": "dispatcher777"},
-                "text": f"/order {self.order.pk}",
-            }
-        }
-        response = self.client.post(
-            reverse("telegram-webhook"),
-            data=payload,
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 200)
-        sent_text = send_chat_message_mock.call_args[0][1]
-        self.assertEqual(sent_text, BOT_DRIVER_ONLY_NOTICE)
-
-    @override_settings(DISPATCHER_TELEGRAM_USER_IDS=[777])
-    @patch("bot.views.send_chat_message")
-    def test_dispatcher_assign_command(self, send_chat_message_mock):
-        driver = Driver.objects.create(
-            full_name="Cmd Driver",
-            phone="+998900000007",
-            status=DriverStatus.AVAILABLE,
-        )
-        Vehicle.objects.create(
-            driver=driver,
-            plate_number="01A901AA",
-            vehicle_type="large",
-            capacity_ton="20.00",
-        )
-        payload = {
-            "message": {
-                "message_id": 27,
-                "chat": {"id": 777},
-                "from": {"id": 777, "username": "dispatcher777"},
-                "text": f"/assign {self.order.pk} {driver.pk}",
-            }
-        }
-        response = self.client.post(
-            reverse("telegram-webhook"),
-            data=payload,
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 200)
-        self.order.refresh_from_db()
-        driver.refresh_from_db()
-        self.assertEqual(self.order.status, OrderStatus.NEW)
-        self.assertEqual(driver.status, DriverStatus.AVAILABLE)
-        self.assertFalse(Assignment.objects.filter(order=self.order).exists())
-        self.assertEqual(send_chat_message_mock.call_args[0][1], BOT_DRIVER_ONLY_NOTICE)
-
-    @override_settings(DISPATCHER_TELEGRAM_USER_IDS=[777])
-    @patch("bot.views.send_chat_message")
-    def test_dispatcher_assign_rejects_low_capacity_driver(self, send_chat_message_mock):
-        driver = Driver.objects.create(
-            full_name="Small Cmd Driver",
-            phone="+998900000010",
-            status=DriverStatus.AVAILABLE,
-        )
-        Vehicle.objects.create(
-            driver=driver,
-            plate_number="01A902AA",
-            vehicle_type="small",
-            capacity_ton="2.00",
-        )
-        payload = {
-            "message": {
-                "message_id": 31,
-                "chat": {"id": 777},
-                "from": {"id": 777, "username": "dispatcher777"},
-                "text": f"/assign {self.order.pk} {driver.pk}",
-            }
-        }
-        response = self.client.post(
-            reverse("telegram-webhook"),
-            data=payload,
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 200)
-        self.order.refresh_from_db()
-        self.assertEqual(self.order.status, OrderStatus.NEW)
-        self.assertEqual(send_chat_message_mock.call_args[0][1], BOT_DRIVER_ONLY_NOTICE)
-
-    @override_settings(DISPATCHER_TELEGRAM_USER_IDS=[777])
-    @patch("bot.views.send_chat_message")
-    def test_dispatcher_orders_with_page(self, send_chat_message_mock):
-        for idx in range(12):
-            Order.objects.create(
-                from_location=f"Zavod-{idx}",
-                to_location="Urganch",
-                cargo_type="Yuk",
-                weight_ton="10.00",
-                pickup_time=timezone.now(),
-                contact_name="A",
-                contact_phone="+998900000099",
-                status=OrderStatus.NEW,
-            )
-        payload = {
-            "message": {
-                "message_id": 28,
-                "chat": {"id": 777},
-                "from": {"id": 777, "username": "dispatcher777"},
-                "text": "/orders new 2",
-            }
-        }
-        response = self.client.post(
-            reverse("telegram-webhook"),
-            data=payload,
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(send_chat_message_mock.call_args[0][1], BOT_DRIVER_ONLY_NOTICE)
-
-    @override_settings(DISPATCHER_TELEGRAM_USER_IDS=[777])
-    @patch("bot.views.send_chat_message")
-    def test_dispatcher_drivers_command(self, send_chat_message_mock):
-        driver = Driver.objects.create(
-            full_name="Free Driver",
-            phone="+998900000008",
-            status=DriverStatus.AVAILABLE,
-        )
-        Vehicle.objects.create(
-            driver=driver,
-            plate_number="01A333AA",
-            vehicle_type="mid",
-            capacity_ton="11.00",
-        )
-        payload = {
-            "message": {
-                "message_id": 29,
-                "chat": {"id": 777},
-                "from": {"id": 777, "username": "dispatcher777"},
-                "text": "/drivers",
-            }
-        }
-        response = self.client.post(
-            reverse("telegram-webhook"),
-            data=payload,
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(send_chat_message_mock.call_args[0][1], BOT_DRIVER_ONLY_NOTICE)
-
-    @override_settings(DISPATCHER_TELEGRAM_USER_IDS=[777])
-    @patch("bot.views.send_chat_message")
-    def test_dispatcher_drivers_with_busy_filter(self, send_chat_message_mock):
-        busy_driver = Driver.objects.create(
-            full_name="Busy List Driver",
-            phone="+998900000011",
-            status=DriverStatus.BUSY,
-        )
-        payload = {
-            "message": {
-                "message_id": 32,
-                "chat": {"id": 777},
-                "from": {"id": 777, "username": "dispatcher777"},
-                "text": "/drivers busy",
-            }
-        }
-        response = self.client.post(
-            reverse("telegram-webhook"),
-            data=payload,
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(send_chat_message_mock.call_args[0][1], BOT_DRIVER_ONLY_NOTICE)
-
-    @override_settings(DISPATCHER_TELEGRAM_USER_IDS=[777])
-    @patch("bot.views.send_chat_message")
-    def test_dispatcher_command_logs_created(self, send_chat_message_mock):
-        payload = {
-            "update_id": 33001,
-            "message": {
-                "message_id": 33,
-                "chat": {"id": 777},
-                "from": {"id": 777, "username": "dispatcher777"},
-                "text": "/drivers",
             },
         }
         response = self.client.post(
@@ -885,13 +1070,10 @@ class BotWebhookTests(TestCase):
             content_type="application/json",
         )
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(
-            TelegramMessageLog.objects.filter(
-                event="dispatcher_command", payload__command="/drivers", payload__reason="web_only"
-            ).exists()
-        )
+        self.assertTrue(send_chat_message_mock.called)
+        self.assertEqual(send_chat_message_mock.call_args[0][1], REGISTER_FIRST)
 
-    @override_settings(TELEGRAM_WEBHOOK_SECRET="", DISPATCHER_TELEGRAM_USER_IDS=[777])
+    @override_settings(TELEGRAM_WEBHOOK_SECRET="")
     @patch("bot.views._handle_message")
     def test_webhook_same_update_id_processed_once(self, handle_message_mock):
         cache.clear()
@@ -907,120 +1089,6 @@ class BotWebhookTests(TestCase):
         self.client.post(reverse("telegram-webhook"), data=payload, content_type="application/json")
         self.client.post(reverse("telegram-webhook"), data=payload, content_type="application/json")
         self.assertEqual(handle_message_mock.call_count, 1)
-
-    @override_settings(DISPATCHER_TELEGRAM_USER_IDS=[777])
-    @patch("bot.views.send_chat_message")
-    def test_dispatcher_audit_command(self, send_chat_message_mock):
-        first_payload = {
-            "message": {
-                "message_id": 34,
-                "chat": {"id": 777},
-                "from": {"id": 777, "username": "dispatcher777"},
-                "text": "/drivers",
-            }
-        }
-        second_payload = {
-            "message": {
-                "message_id": 35,
-                "chat": {"id": 777},
-                "from": {"id": 777, "username": "dispatcher777"},
-                "text": "/orders",
-            }
-        }
-        self.client.post(reverse("telegram-webhook"), data=first_payload, content_type="application/json")
-        self.client.post(reverse("telegram-webhook"), data=second_payload, content_type="application/json")
-        audit_payload = {
-            "message": {
-                "message_id": 36,
-                "chat": {"id": 777},
-                "from": {"id": 777, "username": "dispatcher777"},
-                "text": "/audit 5",
-            }
-        }
-        response = self.client.post(
-            reverse("telegram-webhook"),
-            data=audit_payload,
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 200)
-        sent_text = send_chat_message_mock.call_args[0][1]
-        self.assertEqual(sent_text, BOT_DRIVER_ONLY_NOTICE)
-
-    @override_settings(DISPATCHER_TELEGRAM_USER_IDS=[777])
-    @patch("bot.views.send_chat_message")
-    @patch("bot.views.edit_group_message")
-    @patch("bot.views.answer_callback_query")
-    def test_dispatcher_assign_callback_then_audit_command_are_web_only(
-        self, _answer_callback_query, _edit_group_message, send_chat_message_mock
-    ):
-        driver = Driver.objects.create(
-            full_name="Audit Callback Driver",
-            phone="+998900000012",
-            status=DriverStatus.AVAILABLE,
-        )
-        Vehicle.objects.create(
-            driver=driver,
-            plate_number="01A903AA",
-            vehicle_type="large",
-            capacity_ton="12.00",
-        )
-        callback_payload = {
-            "callback_query": {
-                "id": "cb-audit-1",
-                "data": f"order:{self.order.pk}:assign:{driver.pk}",
-                "from": {"id": 777, "username": "dispatcher1"},
-                "message": {"chat": {"id": -1001}, "message_id": 9},
-            }
-        }
-        self.client.post(reverse("telegram-webhook"), data=callback_payload, content_type="application/json")
-        self.assertEqual(self.order.status, OrderStatus.NEW)
-        audit_payload = {
-            "message": {
-                "message_id": 37,
-                "chat": {"id": 777},
-                "from": {"id": 777, "username": "dispatcher777"},
-                "text": "/audit callbacks 5",
-            }
-        }
-        response = self.client.post(
-            reverse("telegram-webhook"),
-            data=audit_payload,
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(send_chat_message_mock.call_args[0][1], BOT_DRIVER_ONLY_NOTICE)
-
-    @override_settings(DISPATCHER_TELEGRAM_USER_IDS=[777])
-    @patch("bot.views.send_chat_message")
-    def test_dispatcher_unassign_command(self, send_chat_message_mock):
-        driver = Driver.objects.create(
-            full_name="Busy Driver",
-            phone="+998900000009",
-            status=DriverStatus.BUSY,
-        )
-        Assignment.objects.create(order=self.order, driver=driver, assigned_by="dispatcher")
-        self.order.status = OrderStatus.ASSIGNED
-        self.order.save(update_fields=["status", "updated_at"])
-        payload = {
-            "message": {
-                "message_id": 30,
-                "chat": {"id": 777},
-                "from": {"id": 777, "username": "dispatcher777"},
-                "text": f"/unassign {self.order.pk}",
-            }
-        }
-        response = self.client.post(
-            reverse("telegram-webhook"),
-            data=payload,
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 200)
-        self.order.refresh_from_db()
-        driver.refresh_from_db()
-        self.assertTrue(Assignment.objects.filter(order=self.order).exists())
-        self.assertEqual(driver.status, DriverStatus.BUSY)
-        self.assertEqual(self.order.status, OrderStatus.ASSIGNED)
-        self.assertEqual(send_chat_message_mock.call_args[0][1], BOT_DRIVER_ONLY_NOTICE)
 
 
 class TelegramOrderGeocodeUpdateTests(TestCase):

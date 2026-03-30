@@ -1,8 +1,9 @@
 from django.contrib import messages
 from django.contrib.admin.views.decorators import staff_member_required
 from django.conf import settings as dj_settings
+from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
-from django.db import connection, transaction
+from django.db import DatabaseError, connection, transaction
 from django.http import JsonResponse
 from django.utils import timezone
 from django.shortcuts import get_object_or_404, redirect, render
@@ -11,20 +12,34 @@ from decimal import InvalidOperation
 import json
 import re
 
-from bot.services import driver_idle_reply_keyboard, send_chat_message, send_order_to_group
+from bot.services import driver_idle_reply_keyboard, send_chat_message, send_ops_notification, send_order_to_group
 from common.permissions import WEB_OPERATION_GROUPS, WEB_PANEL_GROUPS, groups_required
 from dispatch.models import Assignment, DriverOfferApproval, DriverOfferDecision, DriverOfferResponse
+from drivers.forms import DriverDeliveryReviewForm
+from drivers.models import DriverDeliveryReview, DriverStatus
+from drivers.services import get_driver_review_aggregates, recompute_driver_rating_score
 from bot.models import TelegramMessageLog
 from dispatch.services import assign_order
 from pricing.models import PriceQuote, TenderBid, TenderSession
 from pricing.services import build_price_breakdown, evaluate_tender_bid, suggest_price
 
-from .forms import ClientForm, OrderCreateForm, OrderCustodyForm
-from .models import Client, Order, OrderStatus, QuantityUnit
+from .forms import (
+    ClientForm,
+    OrderCreateForm,
+    OrderCustodyForm,
+    OrderExtraExpenseForm,
+    OrderSealAddForm,
+    OrderSealUpdateForm,
+)
+from .models import Client, Order, OrderExtraExpense, OrderSeal, OrderStatus, QuantityUnit
 from .quantity import quantity_to_metric_tonnes, shortage_tonnes
 from .services import apply_client_contract, create_return_trip, reopen_order, split_shipment, transition_order
 from tracking.models import LocationPing
-from drivers.models import DriverStatus
+
+
+def _web_actor_username(request) -> str:
+    u = getattr(request.user, "username", None) or str(request.user.pk)
+    return f"web:{u}"
 
 
 def _shortage_penalty_points(shortage_kg: Decimal) -> int:
@@ -49,12 +64,28 @@ def _calculate_shortage_kg(order: Order) -> Decimal | None:
     return (short_ton * Decimal("1000")).quantize(Decimal("0.001"))
 
 
+def _format_age_short(seconds: int | None) -> str:
+    if seconds is None:
+        return "—"
+    sec = max(0, int(seconds))
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec // 60}m"
+    hours = sec // 3600
+    mins = (sec % 3600) // 60
+    if mins:
+        return f"{hours}h {mins}m"
+    return f"{hours}h"
+
+
 def _custody_cells_for_list(
     loaded_q,
     loaded_uom: str | None,
     delivered_q,
     delivered_uom: str | None,
     density,
+    delivered_density=None,
 ) -> tuple[str, str, str]:
     """Jadval uchun: yuklangan, topshirilgan, farq (t)."""
     unit_labels = dict(QuantityUnit.choices)
@@ -78,13 +109,20 @@ def _custody_cells_for_list(
         lq = Decimal(str(loaded_q)) if loaded_q is not None else None
         dq = Decimal(str(delivered_q)) if delivered_q is not None else None
         dens_dec = Decimal(str(density)) if density is not None and str(density).strip() != "" else None
+        deliv_dens_dec = (
+            Decimal(str(delivered_density))
+            if delivered_density is not None and str(delivered_density).strip() != ""
+            else None
+        )
     except Exception:
         lq = dq = None
         dens_dec = None
+        deliv_dens_dec = None
     lu = loaded_uom or QuantityUnit.TON
     du = delivered_uom or QuantityUnit.TON
+    dt_density = deliv_dens_dec if deliv_dens_dec is not None else dens_dec
     lt = quantity_to_metric_tonnes(lq, lu, density_kg_per_liter=dens_dec) if lq is not None else None
-    dt = quantity_to_metric_tonnes(dq, du, density_kg_per_liter=dens_dec) if dq is not None else None
+    dt = quantity_to_metric_tonnes(dq, du, density_kg_per_liter=dt_density) if dq is not None else None
     st = shortage_tonnes(lt, dt)
     if st is not None:
         if st > 0:
@@ -103,15 +141,43 @@ def order_list(request):
             qs = qs.filter(status=status)
         paginator = Paginator(qs, int(getattr(dj_settings, "ORDERS_LIST_PER_PAGE", 25) or 25))
         page_obj = paginator.get_page(request.GET.get("page"))
+        visible_orders = list(page_obj.object_list)
+        visible_order_ids = [o.pk for o in visible_orders]
+        latest_ping_map: dict[int, timezone.datetime] = {}
+        if visible_order_ids:
+            rows = (
+                LocationPing.objects.filter(order_id__in=visible_order_ids)
+                .order_by("order_id", "-captured_at")
+                .values("order_id", "captured_at")
+            )
+            for row in rows.iterator(chunk_size=200):
+                oid = int(row["order_id"])
+                if oid not in latest_ping_map:
+                    latest_ping_map[oid] = row["captured_at"]
+        stale_sec = int(getattr(dj_settings, "ORDER_LIVE_STALE_SEC", 600) or 600)
+        now = timezone.now()
+        for order in visible_orders:
+            cap = latest_ping_map.get(order.pk)
+            order.live_ping_at = cap
+            if cap is None:
+                order.live_ping_age_sec = None
+                order.live_ping_age_label = "—"
+                order.live_ping_stale = True
+            else:
+                age = max(0, int((now - cap).total_seconds()))
+                order.live_ping_age_sec = age
+                order.live_ping_age_label = _format_age_short(age)
+                order.live_ping_stale = age >= stale_sec
         return render(
             request,
             "orders/list.html",
             {
-                "orders": page_obj.object_list,
+                "orders": visible_orders,
                 "page_obj": page_obj,
                 "safe_mode": False,
                 "status_filter": status,
                 "order_status_choices": OrderStatus.choices,
+                "order_live_stale_sec": stale_sec,
             },
         )
     except InvalidOperation:
@@ -186,7 +252,16 @@ def order_create(request):
                 final_price=order.client_price,
                 is_approved=True,
             )
-            send_order_to_group(order)
+            if not send_order_to_group(order):
+                messages.warning(
+                    request,
+                    "Buyurtma saqlandi, lekin Telegram guruhiga xabar yuborilmadi. "
+                    ".env da TELEGRAM_BOT_TOKEN va TELEGRAM_GROUP_ID ni tekshiring; "
+                    "forum guruh bo‘lsa TELEGRAM_GROUP_MESSAGE_THREAD_ID qo‘ying; "
+                    "bot guruhda va xabar yuborish huquqi borligini tasdiqlang. "
+                    "Diagnostika: python manage.py test_telegram_group",
+                )
+            send_ops_notification("order_created", order=order, note="Dispetcher tomonidan yaratildi")
             messages.success(request, f"Buyurtma #{order.pk} yaratildi.")
             return redirect("order-detail", pk=order.pk)
     else:
@@ -216,11 +291,11 @@ def client_pricing_preview(request):
 @staff_member_required
 def order_detail(request, pk: int):
     try:
-        order = get_object_or_404(Order, pk=pk)
+        order = get_object_or_404(Order.objects.prefetch_related("seals", "additional_expenses"), pk=pk)
     except InvalidOperation:
         _repair_order_decimal_data(pk)
         try:
-            order = get_object_or_404(Order, pk=pk)
+            order = get_object_or_404(Order.objects.prefetch_related("seals", "additional_expenses"), pk=pk)
             messages.warning(request, "Buyurtmadagi noto'g'ri raqam formatlari avtomatik tuzatildi.")
         except InvalidOperation:
             messages.error(
@@ -320,6 +395,23 @@ def order_detail(request, pk: int):
     split_max = int(getattr(dj_settings, "SPLIT_SHIPMENT_MAX_PARTS", 10) or 10)
 
     custody_form = OrderCustodyForm(instance=order)
+    seal_add_form = OrderSealAddForm()
+    seals_qs = order.seals.all()
+    seal_rows = list(seals_qs)
+    seal_broken_any = any(s.is_broken for s in seal_rows)
+    seal_count = len(seal_rows)
+    seal_update_forms = [(s, OrderSealUpdateForm(instance=s, prefix=f"seal{s.pk}")) for s in seal_rows]
+    expense_form = OrderExtraExpenseForm()
+    expenses = list(order.additional_expenses.all())
+
+    driver_review = DriverDeliveryReview.objects.filter(order_id=order.pk).first()
+    driver_review_form = DriverDeliveryReviewForm(instance=driver_review)
+    can_driver_review = order.status == OrderStatus.COMPLETED and assignment is not None
+    driver_review_stats = {"count": 0, "avg_stars": None}
+    if assignment and assignment.driver_id:
+        assignment.driver.refresh_from_db()
+        rc, ra = get_driver_review_aggregates(assignment.driver)
+        driver_review_stats = {"count": rc, "avg_stars": ra}
 
     return render(
         request,
@@ -327,6 +419,16 @@ def order_detail(request, pk: int):
         {
             "order": order,
             "custody_form": custody_form,
+            "seal_add_form": seal_add_form,
+            "seal_broken_any": seal_broken_any,
+            "seal_count": seal_count,
+            "seal_update_forms": seal_update_forms,
+            "expense_form": expense_form,
+            "expenses": expenses,
+            "driver_review": driver_review,
+            "driver_review_form": driver_review_form,
+            "can_driver_review": can_driver_review,
+            "driver_review_stats": driver_review_stats,
             "quote_preview": quote_preview,
             "driver_responses": driver_responses,
             "pickup_point": pickup_point,
@@ -376,6 +478,41 @@ def order_live_location(request, pk: int):
 
 
 @staff_member_required
+def order_live_reminder(request, pk: int):
+    if request.method != "POST":
+        return redirect("order-detail", pk=pk)
+
+    order = get_object_or_404(Order, pk=pk)
+    if order.status != OrderStatus.IN_TRANSIT:
+        messages.warning(request, "Eslatma faqat yo‘ldagi (IN_TRANSIT) buyurtmada yuboriladi.")
+        return redirect("order-detail", pk=pk)
+
+    ass = Assignment.objects.select_related("driver").filter(order=order).first()
+    if not ass or not ass.driver_id:
+        messages.warning(request, "Bu buyurtmaga shofyor biriktirilmagan.")
+        return redirect("order-detail", pk=pk)
+    if not ass.driver.telegram_user_id:
+        messages.warning(request, "Shofyor Telegram’ga ulanmagan. Eslatma yuborilmadi.")
+        return redirect("order-detail", pk=pk)
+
+    reminder_text = (
+        f"⚠️ Buyurtma #{order.pk}: live location yangilanishi sust.\n"
+        "Iltimos, Telegram’da jonli joylashuvni davom ettiring yoki qayta ulashing:\n"
+        "📎 → Joylashuv → Jonli joylashuv."
+    )
+    send_chat_message(str(ass.driver.telegram_user_id), reminder_text)
+    TelegramMessageLog.objects.create(
+        order=order,
+        chat_id=str(ass.driver.telegram_user_id),
+        message_id="",
+        event="driver_live_reminder_manual",
+        payload={"driver_id": ass.driver_id, "by": _web_actor_username(request)},
+    )
+    messages.success(request, "Haydovchiga live location eslatmasi yuborildi.")
+    return redirect("order-detail", pk=pk)
+
+
+@staff_member_required
 def order_finish_confirm(request, pk: int):
     """
     Driver /finish_trip bosgandan keyin order darhol COMPLETED bo'lmaydi.
@@ -407,6 +544,20 @@ def order_finish_confirm(request, pk: int):
     )
     if not finish_request:
         messages.warning(request, "Haydovchi tugallash so'rovini yubormagan.")
+        return redirect("order-detail", pk=order.pk)
+
+    if order.delivered_quantity is None:
+        messages.error(
+            request,
+            "Klientga topshirilgan hajm kiritilmagan. Tugatishdan oldin avval <code>/topshirildi</code> yoki web-panel orqali hajmni kiriting.",
+        )
+        return redirect("order-detail", pk=order.pk)
+
+    if order.delivered_quantity_uom == QuantityUnit.LITER and order.delivered_quantity_metric_ton is None:
+        messages.error(
+            request,
+            "Litr uchun zichlik kg/L kerak: <code>/topshirildi ... litr 0.84</code> yoki web-paneldagi zichlikni kiriting.",
+        )
         return redirect("order-detail", pk=order.pk)
 
     assignment = Assignment.objects.select_related("driver").filter(order=order).first()
@@ -456,13 +607,9 @@ def order_finish_confirm(request, pk: int):
         ]
     )
 
-    if driver and penalty_points > 0:
-        minimum = Decimal(str(getattr(dj_settings, "SHORTAGE_RATING_MIN", 0) or 0))
-        current = Decimal(str(driver.rating_score or 0))
-        next_rating = max(minimum, current - Decimal(str(penalty_points)))
-        if next_rating != current:
-            driver.rating_score = next_rating
-            driver.save(update_fields=["rating_score", "updated_at"])
+    if driver:
+        recompute_driver_rating_score(driver)
+        driver.refresh_from_db()
 
     if order.delivered_quantity is None:
         messages.warning(
@@ -519,7 +666,8 @@ def order_finish_confirm(request, pk: int):
     if penalty_points > 0:
         messages.warning(
             request,
-            f"Haydovchi reytingidan {penalty_points} ball tushirildi. Joriy rating: {driver.rating_score if driver else '-'}",
+            f"Kamomad jarimasi: {penalty_points} ball (reyting qayta hisoblandi). "
+            f"Joriy reyting: {driver.rating_score if driver else '-'}",
         )
 
     TelegramMessageLog.objects.create(
@@ -562,6 +710,151 @@ def order_custody_update(request, pk: int):
         obj.delivered_recorded_by = f"web:{username}"
     obj.save()
     messages.success(request, "Hajm va zichlik ma'lumotlari saqlandi.")
+    return redirect("order-detail", pk=pk)
+
+
+@staff_member_required
+def order_seal_add(request, pk: int):
+    if request.method != "POST":
+        return redirect("order-detail", pk=pk)
+    order = get_object_or_404(Order, pk=pk)
+    form = OrderSealAddForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, "Muhr qo‘shish: maydonlarni tekshiring.")
+        return redirect("order-detail", pk=pk)
+    seal = form.save(commit=False)
+    seal.order = order
+    seal.loading_recorded_at = timezone.now()
+    seal.loading_recorded_by = _web_actor_username(request)
+    seal.save()
+    messages.success(request, "Muhr qo‘shildi.")
+    return redirect("order-detail", pk=pk)
+
+
+@staff_member_required
+def order_seal_update(request, pk: int, seal_id: int):
+    if request.method != "POST":
+        return redirect("order-detail", pk=pk)
+    order = get_object_or_404(Order, pk=pk)
+    seal = get_object_or_404(OrderSeal, pk=seal_id, order=order)
+    pfx = f"seal{seal.pk}"
+    form = OrderSealUpdateForm(request.POST, instance=seal, prefix=pfx)
+    if not form.is_valid():
+        messages.error(
+            request,
+            "Muhrni yangilash: formani tekshiring. "
+            + (form.errors.as_text() if form.errors else ""),
+        )
+        return redirect("order-detail", pk=pk)
+    obj = form.save(commit=False)
+    username = _web_actor_username(request)
+    new_unl = (form.cleaned_data.get("seal_number_unloading") or "").strip()
+    if "seal_number_unloading" in form.changed_data and new_unl:
+        if seal.unloading_recorded_at is None:
+            obj.unloading_recorded_at = timezone.now()
+            obj.unloading_recorded_by = username
+        elif (seal.seal_number_unloading or "").strip() != new_unl:
+            obj.unloading_recorded_by = username
+
+    if form.cleaned_data.get("is_broken"):
+        if seal.broken_at is None:
+            obj.broken_at = timezone.now()
+            obj.broken_recorded_by = username
+    else:
+        obj.broken_at = None
+        obj.broken_recorded_by = ""
+
+    obj.save()
+    messages.success(request, "Muhr ma’lumoti yangilandi.")
+    return redirect("order-detail", pk=pk)
+
+
+@staff_member_required
+def order_seal_delete(request, pk: int, seal_id: int):
+    if request.method != "POST":
+        return redirect("order-detail", pk=pk)
+    order = get_object_or_404(Order, pk=pk)
+    seal = get_object_or_404(OrderSeal, pk=seal_id, order=order)
+    seal.delete()
+    messages.success(request, "Muhr yozuvi o‘chirildi.")
+    return redirect("order-detail", pk=pk)
+
+
+@staff_member_required
+def order_expense_add(request, pk: int):
+    if request.method != "POST":
+        return redirect("order-detail", pk=pk)
+    order = get_object_or_404(Order, pk=pk)
+    form = OrderExtraExpenseForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, "Qo‘shimcha xarajat formasini tekshiring.")
+        return redirect("order-detail", pk=pk)
+    exp = form.save(commit=False)
+    exp.order = order
+    exp.recorded_by = _web_actor_username(request)
+    exp.save()
+    messages.success(request, "Qo‘shimcha xarajat saqlandi.")
+    return redirect("order-detail", pk=pk)
+
+
+@staff_member_required
+def order_driver_review(request, pk: int):
+    """Yakunlangan reys uchun shofyor bahosi — reyting qayta hisoblanadi."""
+    if request.method != "POST":
+        return redirect("order-detail", pk=pk)
+
+    form = DriverDeliveryReviewForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, "Baholash: " + form.errors.as_text().strip())
+        return redirect("order-detail", pk=pk)
+
+    uname = getattr(request.user, "username", None) or str(request.user.pk)
+    stars = form.cleaned_data["stars"]
+    comment = form.cleaned_data.get("comment") or ""
+
+    try:
+        with transaction.atomic():
+            order = Order.objects.select_for_update().get(pk=pk)
+            if order.status != OrderStatus.COMPLETED:
+                messages.error(request, "Faqat yakunlangan buyurtma uchun shofyor bahosi qoldiriladi.")
+                return redirect("order-detail", pk=pk)
+            ass = Assignment.objects.select_for_update().select_related("driver").filter(order=order).first()
+            if not ass or not ass.driver_id:
+                messages.error(request, "Bu buyurtmada biriktirilgan shofyor yo‘q.")
+                return redirect("order-detail", pk=pk)
+            existing = DriverDeliveryReview.objects.select_for_update().filter(order=order).first()
+            if existing:
+                existing.stars = stars
+                existing.comment = comment
+                existing.driver = ass.driver
+                existing.recorded_by_username = uname
+                existing.full_clean()
+                existing.save()
+            else:
+                review = DriverDeliveryReview(
+                    order=order,
+                    driver=ass.driver,
+                    stars=stars,
+                    comment=comment,
+                    recorded_by_username=uname,
+                )
+                review.full_clean()
+                review.save()
+            recompute_driver_rating_score(ass.driver)
+    except ValidationError as e:
+        parts: list[str] = []
+        err_dict = getattr(e, "error_dict", None) or {}
+        for ev in err_dict.values():
+            parts.extend(str(x) for x in ev)
+        if not parts:
+            parts = [str(m) for m in e.messages]
+        messages.error(request, "; ".join(parts) if parts else "Tasdiqlash xatosi.")
+        return redirect("order-detail", pk=pk)
+    except DatabaseError:
+        messages.error(request, "Maʼlumotlar bazasi xatosi. Qayta urinib ko‘ring.")
+        return redirect("order-detail", pk=pk)
+
+    messages.success(request, "Shofyor bahosi saqlandi. Reyting yangilandi.")
     return redirect("order-detail", pk=pk)
 
 
@@ -818,7 +1111,7 @@ def _render_order_list_safe(request):
             SELECT o.id, o.from_location, o.to_location, c.name, o.cargo_type, o.weight_ton,
                    o.client_price, o.driver_fee, o.fuel_cost, o.extra_cost, o.penalty_amount, o.status,
                    o.loaded_quantity, o.loaded_quantity_uom, o.delivered_quantity, o.delivered_quantity_uom,
-                   o.density_kg_per_liter
+                   o.density_kg_per_liter, o.delivered_density_kg_per_liter
             FROM orders_order o
             LEFT JOIN orders_client c ON c.id = o.client_id
         """
@@ -847,6 +1140,7 @@ def _render_order_list_safe(request):
                 delivered_quantity,
                 delivered_quantity_uom,
                 density_kg_per_liter,
+                delivered_density_kg_per_liter,
             ) = row
             margin = _safe_decimal(client_price) - _safe_decimal(driver_fee) - _safe_decimal(fuel_cost) - _safe_decimal(extra_cost) - _safe_decimal(penalty_amount)
             cl, cd, cs = _custody_cells_for_list(
@@ -855,6 +1149,7 @@ def _render_order_list_safe(request):
                 delivered_quantity,
                 delivered_quantity_uom,
                 density_kg_per_liter,
+                delivered_density_kg_per_liter,
             )
             rows.append(
                 {

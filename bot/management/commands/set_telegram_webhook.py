@@ -1,6 +1,6 @@
 import json
 from urllib import parse, request
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
@@ -39,6 +39,17 @@ class Command(BaseCommand):
         try:
             with request.urlopen(req, timeout=25) as resp:
                 raw = json.loads(resp.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            try:
+                parsed = json.loads(detail)
+                desc = parsed.get("description") or detail
+            except (json.JSONDecodeError, TypeError):
+                desc = detail or str(exc)
+            raise CommandError(
+                f"Telegram API {exc.code}: {desc}\n"
+                "Agar secret_token xato bo'lsa: faqat A-Z, a-z, 0-9, _, - (bo'sh joy va boshqa belgilar mumkin emas)."
+            ) from exc
         except URLError as exc:
             raise CommandError(f"Tarmoq xato: {exc}") from exc
         if not raw.get("ok"):

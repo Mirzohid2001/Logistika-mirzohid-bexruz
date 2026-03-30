@@ -67,9 +67,21 @@
           <td>{{ row.driver.phone }}</td>
           <td>{{ row.driver.get_status_display }}</td>
           <td>
-            {% if row.driver.verification_status == "pending" %}⏳ Kutilmoqda{% endif %}
-            {% if row.driver.verification_status == "approved" %}✅ Tasdiqlangan{% endif %}
-            {% if row.driver.verification_status == "rejected" %}❌ Rad etilgan{% endif %}
+            {% if row.driver.verification_status == "pending" %}
+              <div>⏳ Kutilmoqda</div>
+              <div class="row-actions-tight" style="margin-top:6px;">
+                <form method="post" action="{% url 'driver-verify-approve' row.driver.id %}" style="display:inline">{% csrf_token %}
+                  <input type="hidden" name="next" value="list" />
+                  <button class="btn btn-success" type="submit" style="font-size:12px;padding:4px 10px">Tasdiqlash</button>
+                </form>
+                <a class="btn btn-secondary" style="font-size:12px;padding:4px 10px" href="{% url 'driver-detail' row.driver.id %}">Ko‘rish</a>
+              </div>
+              <p class="muted" style="font-size:11px;margin:4px 0 0 0">Rad etish uchun 360 sahifasiga o‘ting.</p>
+            {% elif row.driver.verification_status == "approved" %}
+              ✅ Tasdiqlangan
+            {% elif row.driver.verification_status == "rejected" %}
+              ❌ Rad etilgan
+            {% endif %}
           </td>
           <td>
             <b>{{ row.doc_score }}%</b>

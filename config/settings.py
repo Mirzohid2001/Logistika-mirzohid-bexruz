@@ -23,7 +23,7 @@ INSTALLED_APPS = [
     "rest_framework.authtoken",
     "blog",
     "orders",
-    "drivers",
+    "drivers.apps.DriversConfig",
     "dispatch",
     "pricing",
     "tracking",
@@ -102,13 +102,22 @@ MEDIA_ROOT = BASE_DIR / "media"
 
 TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN", default="")
 TELEGRAM_GROUP_ID = env("TELEGRAM_GROUP_ID", default="")
+_tg_topic_raw = (env("TELEGRAM_GROUP_MESSAGE_THREAD_ID", default="") or "").strip()
+try:
+    TELEGRAM_GROUP_MESSAGE_THREAD_ID: int | None = int(_tg_topic_raw) if _tg_topic_raw else None
+except ValueError:
+    TELEGRAM_GROUP_MESSAGE_THREAD_ID = None
+TELEGRAM_OPS_GROUP_ID = env("TELEGRAM_OPS_GROUP_ID", default="")
+_tg_ops_topic_raw = (env("TELEGRAM_OPS_GROUP_MESSAGE_THREAD_ID", default="") or "").strip()
+try:
+    TELEGRAM_OPS_GROUP_MESSAGE_THREAD_ID: int | None = int(_tg_ops_topic_raw) if _tg_ops_topic_raw else None
+except ValueError:
+    TELEGRAM_OPS_GROUP_MESSAGE_THREAD_ID = None
 TELEGRAM_WEBHOOK_SECRET = env("TELEGRAM_WEBHOOK_SECRET", default="")
 # True bo‘lsa, reys xabariga Yandex marshrut havolalari qo‘shiladi; aks holda faqat Telegram pinlari
 TRIP_MAP_SHOW_YANDEX_LINKS = env.bool("TRIP_MAP_SHOW_YANDEX_LINKS", default=False)
 # HTTPS asosiy domen (masalan https://bot.sizningdomen.uz) — Telegram Web App marshrut xaritasi uchun majburiy
 TELEGRAM_WEBAPP_BASE_URL = env("TELEGRAM_WEBAPP_BASE_URL", default="").strip().rstrip("/")
-# Veb-only operatorlar (admin) Telegram ID lari: ular botda buyurtma boshqarmaydi, faqat web.
-DISPATCHER_TELEGRAM_USER_IDS = [int(value) for value in env.list("DISPATCHER_TELEGRAM_USER_IDS", default=[])]
 
 SLA_ESCALATION_THRESHOLDS_MINUTES = [
     int(value) for value in env.list("SLA_ESCALATION_THRESHOLDS_MINUTES", default=["15", "30", "60"])
@@ -154,8 +163,6 @@ ORDER_RESET_FINANCIALS_ON_ISSUE_OR_CANCELED = env.bool("ORDER_RESET_FINANCIALS_O
 # Web UI: ro'yxatlar sahifasi
 ORDERS_LIST_PER_PAGE = env.int("ORDERS_LIST_PER_PAGE", default=25)
 ANALYTICS_CLIENTS_RATING_PAGE_SIZE = env.int("ANALYTICS_CLIENTS_RATING_PAGE_SIZE", default=20)
-# Telegramda admin buyruqlari ro‘yxati (sahifalash) — asosan tarixiy; operatsiya webda
-DISPATCHER_TELEGRAM_ORDERS_PER_PAGE = env.int("DISPATCHER_TELEGRAM_ORDERS_PER_PAGE", default=10)
 SPLIT_SHIPMENT_MAX_PARTS = env.int("SPLIT_SHIPMENT_MAX_PARTS", default=10)
 
 # REST API pagination

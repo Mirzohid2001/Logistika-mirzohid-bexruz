@@ -335,6 +335,8 @@ def driver_verify_approve(request, driver_id: int):
                 parse_mode="HTML",
             )
         cache.delete("ops_dashboard_v1")
+    if request.method == "POST" and request.POST.get("next") == "list":
+        return redirect("driver-list")
     return redirect("driver-detail", driver_id=driver.id)
 
 
@@ -393,6 +395,8 @@ def driver_verify_reject(request, driver_id: int):
                 },
             )
         cache.delete("ops_dashboard_v1")
+    if request.method == "POST" and request.POST.get("next") == "list":
+        return redirect("driver-list")
     return redirect("driver-detail", driver_id=driver.id)
 
 

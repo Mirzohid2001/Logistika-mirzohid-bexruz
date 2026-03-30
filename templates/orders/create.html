@@ -24,7 +24,7 @@
             <div class="row row-span-2">
               <label for="{{ form.client.id_for_label }}">{{ form.client.label }}</label>
               {{ form.client }}{{ form.client.errors }}
-              <p id="clientPreviewBox" class="client-preview-badge" role="status">Klient tanlang — SLA shu yerda chiqadi. Moliyada faqat haydovchi va o‘z xarajatlaringiz.</p>
+              <p id="clientPreviewBox" class="client-preview-badge" role="status">Klient tanlang — SLA shu yerda chiqadi. Moliyada xizmat haqqi va jarima.</p>
             </div>
             <div class="row">
               <label for="{{ form.pickup_time.id_for_label }}">{{ form.pickup_time.label }}</label>
@@ -107,19 +107,11 @@
 
         <section class="form-section" aria-labelledby="sec-finance">
           <h2 class="form-section-title" id="sec-finance">Moliya</h2>
-          <p class="form-section-hint muted" style="margin-top:0">Klientdan tushum yo‘q: faqat haydovchiga va o‘z byudjetingizdan (yoqilg‘i, qo‘shimcha, jarima).</p>
+          <p class="form-section-hint muted" style="margin-top:0">Klientdan tushum yo‘q: <b>shofyor xizmat haqqi</b> va kerak bo‘lsa <b>jarima</b>.</p>
           <div class="meta-grid">
             <div class="row">
               <label for="{{ form.driver_fee.id_for_label }}">{{ form.driver_fee.label }} (so‘m)</label>
               {{ form.driver_fee }}{{ form.driver_fee.errors }}
-            </div>
-            <div class="row">
-              <label for="{{ form.fuel_cost.id_for_label }}">{{ form.fuel_cost.label }} (so‘m)</label>
-              {{ form.fuel_cost }}{{ form.fuel_cost.errors }}
-            </div>
-            <div class="row">
-              <label for="{{ form.extra_cost.id_for_label }}">{{ form.extra_cost.label }} (so‘m)</label>
-              {{ form.extra_cost }}{{ form.extra_cost.errors }}
             </div>
             <div class="row">
               <label for="{{ form.penalty_amount.id_for_label }}">{{ form.penalty_amount.label }} (so‘m)</label>
@@ -307,7 +299,7 @@
       if (!clientEl) return;
       const clientId = (clientEl.value || "").toString().trim();
       if (!clientId) {
-        showHint("Klient tanlang — SLA shu yerda chiqadi. Moliyada faqat haydovchi va o‘z xarajatlaringiz.");
+        showHint("Klient tanlang — SLA shu yerda chiqadi. Moliyada xizmat haqqi va jarima.");
         return;
       }
       try {

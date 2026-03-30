@@ -38,14 +38,26 @@
     {% endif %}
     {% if order.density_kg_per_liter %}
       <div class="meta-item">
-        <b>Zichlik</b>
+        <b>Zichlik (yuklangan)</b>
         <span>{{ order.density_kg_per_liter }} kg/L</span>
+      </div>
+    {% endif %}
+    {% if order.delivered_density_kg_per_liter %}
+      <div class="meta-item">
+        <b>Zichlik (topshirish)</b>
+        <span>{{ order.delivered_density_kg_per_liter }} kg/L</span>
       </div>
     {% endif %}
     {% if order.quantity_shortage_metric_ton and order.quantity_shortage_metric_ton > 0 %}
       <div class="meta-item" style="border-left:3px solid #c0392b;padding-left:10px">
         <b>Farq (yuk − topshirish)</b>
         <span>≈ {{ order.quantity_shortage_metric_ton }} t — tekshiruv tavsiya</span>
+      </div>
+    {% endif %}
+    {% if seal_count %}
+      <div class="meta-item"{% if seal_broken_any %} style="border-left:3px solid #c0392b;padding-left:10px"{% endif %}>
+        <b>Tanker muhrlari</b>
+        <span>{{ seal_count }} ta qator{% if seal_broken_any %} — <strong>muhr buzilgan qayd bor</strong>{% endif %}</span>
       </div>
     {% endif %}
     {% if order.shortage_kg is not None %}
@@ -65,8 +77,16 @@
       <span>{{ order.client_price }}</span>
     </div>
     <div class="meta-item">
-      <b>Shofyor to‘lovi</b>
+      <b>Shofyor xizmat haqqi</b>
       <span>{{ order.driver_fee }}</span>
+    </div>
+    <div class="meta-item">
+      <b>Jarima</b>
+      <span>{{ order.penalty_amount }}</span>
+    </div>
+    <div class="meta-item">
+      <b>Qo‘shimcha xarajatlar</b>
+      <span>{{ order.additional_expense_total }}</span>
     </div>
     <div class="meta-item" title="Maydon − chiqimlar; tushum 0 bo‘lsa manfiy">
       <b>Sof qoldiq</b>
@@ -80,6 +100,23 @@
       <b>Holat</b>
       <span class="status-pill">{{ order.get_status_display }}</span>
     </div>
+    {% if assignment_driver %}
+      <div class="meta-item">
+        <b>Biriktirilgan shofyor</b>
+        <span>
+          {{ assignment_driver.full_name }} — reyting <strong>{{ assignment_driver.rating_score }}</strong>
+          {% if driver_review_stats.count %}
+            <span class="muted">({{ driver_review_stats.count }} ta sharh{% if driver_review_stats.avg_stars %}, o‘rt. {{ driver_review_stats.avg_stars|floatformat:2 }}★{% endif %})</span>
+          {% endif %}
+        </span>
+      </div>
+    {% endif %}
+    {% if driver_review %}
+      <div class="meta-item">
+        <b>Shofyor bahosi (bu reys)</b>
+        <span>{{ driver_review.stars }}★{% if driver_review.comment %} · {{ driver_review.comment|truncatewords:12 }}{% endif %}</span>
+      </div>
+    {% endif %}
     <div class="meta-item">
       <b>Qaytish reysi</b>
       <span>{% if order.is_return_trip %}Ha (#{{ order.return_of_id }}){% else %}Yo‘q{% endif %}</span>
@@ -106,8 +143,62 @@
 </div>
 
 <div class="card">
+  <h2 class="title">Qo‘shimcha xarajatlar (buxgalteriya)</h2>
+  <form method="post" action="{% url 'order-expense-add' order.pk %}" class="row g-3 align-items-end">
+    {% csrf_token %}
+    <div class="col-md-3">
+      <label class="form-label" for="{{ expense_form.category.id_for_label }}">{{ expense_form.category.label }}</label>
+      {{ expense_form.category }}
+    </div>
+    <div class="col-md-3">
+      <label class="form-label" for="{{ expense_form.amount.id_for_label }}">{{ expense_form.amount.label }}</label>
+      {{ expense_form.amount }}
+    </div>
+    <div class="col-md-3">
+      <label class="form-label" for="{{ expense_form.incurred_at.id_for_label }}">{{ expense_form.incurred_at.label }}</label>
+      {{ expense_form.incurred_at }}
+    </div>
+    <div class="col-md-3">
+      <label class="form-label" for="{{ expense_form.note.id_for_label }}">{{ expense_form.note.label }}</label>
+      {{ expense_form.note }}
+    </div>
+    <div class="col-12">
+      <button class="btn btn-primary" type="submit">Xarajat qo‘shish</button>
+    </div>
+  </form>
+  {% if expenses %}
+    <div class="table-wrap" style="margin-top:12px">
+      <table>
+        <thead>
+          <tr>
+            <th>Sana</th>
+            <th>Tur</th>
+            <th>Summa</th>
+            <th>Izoh</th>
+            <th>Kiritgan</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for e in expenses %}
+            <tr>
+              <td>{{ e.incurred_at|date:"d.m.Y H:i" }}</td>
+              <td>{{ e.get_category_display }}</td>
+              <td>{{ e.amount }}</td>
+              <td>{{ e.note|default:"-" }}</td>
+              <td>{{ e.recorded_by|default:"-" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted" style="margin-top:10px">Hozircha qo‘shimcha xarajat kiritilmagan.</p>
+  {% endif %}
+</div>
+
+<div class="card">
   <h2 class="title">Hajm nazorati (zavod → klient)</h2>
-  <p class="muted">Tarozi yoki o‘lchovchi bo‘yicha fakt. Litr ishlatsangiz, avval zichlik (kg/L) kiriting — keyin litr avtomatik tonnaga hisoblanadi.</p>
+  <p class="muted">Tarozi yoki o‘lchovchi bo‘yicha fakt. Litr ishlatsangiz, har bir qatorda tegishli zichlik (kg/L) kiriting; topshirish zichligini bo‘sh qoldirsangiz, yuklangan zichligi ishlatiladi.</p>
   <form method="post" action="{% url 'order-custody-update' order.pk %}">
     {% csrf_token %}
     <div class="row g-3">
@@ -133,9 +224,93 @@
         <label class="form-label" for="id_delivered_quantity_uom">{{ custody_form.delivered_quantity_uom.label }}</label>
         {{ custody_form.delivered_quantity_uom }}
       </div>
-      <div class="col-md-4 d-flex align-items-end">
-        <button class="btn btn-primary w-100" type="submit">Hajmni saqlash</button>
+      <div class="col-md-4">
+        <label class="form-label" for="id_delivered_density_kg_per_liter">{{ custody_form.delivered_density_kg_per_liter.label }}</label>
+        {{ custody_form.delivered_density_kg_per_liter }}
       </div>
+      <div class="col-12 d-flex justify-content-end">
+        <button class="btn btn-primary" type="submit">Hajmni saqlash</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <h2 class="title">Muhr / qadoqlik (tanker bo‘limlari)</h2>
+  <p class="muted">Har bir bo‘lim yoki muhr uchun alohida qator qo‘shing. Yuklashda berilgan raqamni yozing; klientda tekshirgach tushirish muhrini va kerak bo‘lsa buzilishni qayd eting.</p>
+  {% if seal_update_forms %}
+    <div class="table-wrap" style="margin-bottom:1.25rem">
+      <table>
+        <thead>
+          <tr>
+            <th>Bo‘lim / yuklash</th>
+            <th>Tushirish va buzilish</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for seal, uform in seal_update_forms %}
+            <tr>
+              <td>
+                <strong>{{ seal.compartment|default:"—" }}</strong><br>
+                <code>{{ seal.seal_number_loading }}</code>
+                <div class="muted small">{{ seal.loading_recorded_at|date:"d.m.Y H:i" }}{% if seal.loading_recorded_by %} · {{ seal.loading_recorded_by }}{% endif %}</div>
+                {% if seal.unloading_recorded_at %}
+                  <div class="small">Tushirish qaydi: {{ seal.unloading_recorded_at|date:"d.m.Y H:i" }}{% if seal.unloading_recorded_by %} · {{ seal.unloading_recorded_by }}{% endif %}</div>
+                {% endif %}
+                {% if seal.is_broken and seal.broken_at %}
+                  <div class="text-danger small"><b>Buzilgan:</b> {{ seal.broken_at|date:"d.m.Y H:i" }}{% if seal.broken_recorded_by %} · {{ seal.broken_recorded_by }}{% endif %}</div>
+                {% endif %}
+              </td>
+              <td>
+                <form method="post" action="{% url 'order-seal-update' order.pk seal.pk %}">
+                  {% csrf_token %}
+                  <div class="mb-2">
+                    <label class="form-label small" for="{{ uform.seal_number_unloading.id_for_label }}">{{ uform.seal_number_unloading.label }}</label>
+                    {{ uform.seal_number_unloading }}
+                    {% if uform.seal_number_unloading.errors %}<div class="text-danger small">{{ uform.seal_number_unloading.errors }}</div>{% endif %}
+                  </div>
+                  <div class="form-check mb-2">
+                    {{ uform.is_broken }}
+                    <label class="form-check-label" for="{{ uform.is_broken.id_for_label }}">{{ uform.is_broken.label }}</label>
+                  </div>
+                  <div class="mb-2">
+                    <label class="form-label small" for="{{ uform.broken_note.id_for_label }}">{{ uform.broken_note.label }}</label>
+                    {{ uform.broken_note }}
+                    {% if uform.broken_note.errors %}<div class="text-danger small">{{ uform.broken_note.errors }}</div>{% endif %}
+                  </div>
+                  {% if uform.non_field_errors %}<div class="text-danger small">{{ uform.non_field_errors }}</div>{% endif %}
+                  <button type="submit" class="btn btn-primary btn-sm">Muhrni saqlash</button>
+                </form>
+              </td>
+              <td class="align-top">
+                <form method="post" action="{% url 'order-seal-delete' order.pk seal.pk %}" onsubmit="return confirm('Bu muhr qatorini o‘chirishni tasdiqlaysizmi?');">
+                  {% csrf_token %}
+                  <button type="submit" class="btn btn-secondary btn-sm">O‘chirish</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">Hozircha muhr qaydi yo‘q.</p>
+  {% endif %}
+  <h3 class="title" style="font-size:1rem;margin-top:0.5rem">Yangi muhr qo‘shish</h3>
+  <form method="post" action="{% url 'order-seal-add' order.pk %}" class="row g-3 align-items-end">
+    {% csrf_token %}
+    <div class="col-md-4">
+      <label class="form-label" for="{{ seal_add_form.compartment.id_for_label }}">{{ seal_add_form.compartment.label }}</label>
+      {{ seal_add_form.compartment }}
+    </div>
+    <div class="col-md-4">
+      <label class="form-label" for="{{ seal_add_form.seal_number_loading.id_for_label }}">{{ seal_add_form.seal_number_loading.label }}</label>
+      {{ seal_add_form.seal_number_loading }}
+      {% if seal_add_form.seal_number_loading.errors %}<div class="text-danger small">{{ seal_add_form.seal_number_loading.errors }}</div>{% endif %}
+    </div>
+    <div class="col-md-4">
+      <button type="submit" class="btn btn-primary">Muhr qo‘shish</button>
     </div>
   </form>
 </div>
@@ -206,6 +381,43 @@
   {% endif %}
 </div>
 
+{% if can_driver_review %}
+<div class="card">
+  <h2 class="title">Shofyor bahosi (yetkazib berilgach)</h2>
+  <p class="muted">
+    Barcha sharhlarning <strong>o‘rtacha yulduzi × 20</strong> ball (0–100) qilib olinadi; kamomad bo‘yicha jarima ballari ayiriladi.
+    Bir yakunlangan buyurtmada — bitta sharh (yangilash mumkin).
+  </p>
+  {% if not driver_review %}
+    <p class="small" style="margin-bottom:12px;color:#92400e">Bu reys hali baholanmagan.</p>
+  {% else %}
+    <p class="small muted" style="margin-bottom:12px">
+      Oxirgi saqlagan: <strong>{{ driver_review.recorded_by_username|default:"—" }}</strong>
+      · {{ driver_review.updated_at|date:"d.m.Y H:i" }}
+      · yaratilgan: {{ driver_review.created_at|date:"d.m.Y H:i" }}
+    </p>
+  {% endif %}
+  <form method="post" action="{% url 'order-driver-review' order.pk %}" class="row g-3" novalidate>
+    {% csrf_token %}
+    <div class="col-md-4">
+      <label class="form-label" for="{{ driver_review_form.stars.id_for_label }}">{{ driver_review_form.stars.label }}</label>
+      {{ driver_review_form.stars }}
+      {% if driver_review_form.stars.help_text %}<div class="form-text">{{ driver_review_form.stars.help_text }}</div>{% endif %}
+      {% if driver_review_form.stars.errors %}<div class="text-danger small">{{ driver_review_form.stars.errors }}</div>{% endif %}
+    </div>
+    <div class="col-12">
+      <label class="form-label" for="{{ driver_review_form.comment.id_for_label }}">{{ driver_review_form.comment.label }}</label>
+      {{ driver_review_form.comment }}
+      {% if driver_review_form.comment.help_text %}<div class="form-text">{{ driver_review_form.comment.help_text }}</div>{% endif %}
+      {% if driver_review_form.comment.errors %}<div class="text-danger small">{{ driver_review_form.comment.errors }}</div>{% endif %}
+    </div>
+    <div class="col-12">
+      <button class="btn btn-primary" type="submit">{% if driver_review %}Bahoni yangilash{% else %}Bahoni saqlash{% endif %}</button>
+    </div>
+  </form>
+</div>
+{% endif %}
+
 <div class="card">
   <h2 class="title">Tender va narxlash</h2>
   <div class="actions">
@@ -240,6 +452,15 @@
 
 <div class="card">
   <h2 class="title">Live tracking (Buyurtma)</h2>
+  {% if order.status == "in_transit" and assignment_driver and assignment_driver.telegram_user_id %}
+    <div class="actions" style="margin-bottom:10px">
+      <form method="post" action="{% url 'order-live-reminder' order.pk %}">
+        {% csrf_token %}
+        <button class="btn btn-secondary" type="submit">Haydovchiga live eslatma yuborish</button>
+      </form>
+      <span class="muted" style="align-self:center">Live sust bo‘lsa, bir klikda eslatma yuboriladi.</span>
+    </div>
+  {% endif %}
   <label class="form-check-label muted" style="display:inline-flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer">
     <input type="checkbox" id="orderMapFollowDriver" class="form-check-input" checked />
     Haydovchini kuzatish (xarita silliq siljiydi)

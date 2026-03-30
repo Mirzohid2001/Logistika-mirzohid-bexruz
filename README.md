@@ -72,18 +72,9 @@ python manage.py import_drivers /path/to/drivers.csv
 
 Alohicha dispetcher yo‘q: operatsiyani **admin** (Django guruh **Owner**) boshqaradi. `python manage.py setup_roles` — **Dispatcher** guruhi tarixiy nom, **Owner bilan bir xil to‘liq ruxsat** (migratsiya uchun).
 
-## Admin Telegram buyruqlari (ixtiyoriy; asosiy ish web-panelda)
+## Telegram bot
 
-`DISPATCHER_TELEGRAM_USER_IDS` — faqat veb orqali ishlaydigan adminlarning Telegram ID lari.
-
-- `/help`
-- `/orders [status] [page]`
-- `/order <id>`
-- `/drivers [available|busy|offline]`
-- `/assign <order_id> <driver_id>`
-- `/unassign <order_id>`
-- `/audit [limit]`
-- `/audit callbacks [limit]`
+Bot **faqat haydovchilar** uchun: buyurtma biriktirish, admin buyruqlari va boshqalar **web-panel**da.
 
 ## Driver Commands
 

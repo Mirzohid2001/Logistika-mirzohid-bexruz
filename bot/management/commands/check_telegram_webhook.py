@@ -7,13 +7,36 @@ from django.core.management.base import BaseCommand
 
 
 class Command(BaseCommand):
-    help = "Telegram getWebhookInfo — URL, oxirgi xato, kutilayotgan yangilanishlar."
+    help = "Telegram getMe + getWebhookInfo — bot, URL, oxirgi xato."
 
     def handle(self, *args, **options) -> None:
         token = (settings.TELEGRAM_BOT_TOKEN or "").strip()
         if not token:
             self.stderr.write(self.style.ERROR("TELEGRAM_BOT_TOKEN bo'sh."))
             return
+        me_url = f"https://api.telegram.org/bot{token}/getMe"
+        try:
+            with request.urlopen(me_url, timeout=20) as resp:
+                me_raw = json.loads(resp.read().decode("utf-8"))
+        except URLError as exc:
+            self.stderr.write(self.style.ERROR(f"getMe tarmoq xato: {exc}"))
+            return
+        except (ValueError, UnicodeDecodeError) as exc:
+            self.stderr.write(self.style.ERROR(f"getMe javob o'qilmadi: {exc}"))
+            return
+        if not me_raw.get("ok"):
+            self.stderr.write(self.style.ERROR(str(me_raw)))
+            return
+        bot = me_raw.get("result") or {}
+        uid = bot.get("id", "")
+        uname = bot.get("username") or ""
+        fname = bot.get("first_name") or ""
+        self.stdout.write(self.style.SUCCESS("getMe (token shu botga tegishli)"))
+        self.stdout.write(f"  id: {uid}")
+        self.stdout.write(f"  username: @{uname}" if uname else "  username: (yo'q)")
+        self.stdout.write(f"  first_name: {fname}")
+        self.stdout.write("")
+
         url = f"https://api.telegram.org/bot{token}/getWebhookInfo"
         try:
             with request.urlopen(url, timeout=20) as resp:
