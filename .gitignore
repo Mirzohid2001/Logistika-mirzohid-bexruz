@@ -41,6 +41,9 @@ pip-wheel-metadata/
 coverage.xml
 htmlcov/
 
+config/settings_dev.py
+config/settings_prod.py
+
 # Jupyter
 .ipynb_checkpoints/
 

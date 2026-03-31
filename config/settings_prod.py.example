@@ -1,0 +1,15 @@
+import sentry_sdk
+from sentry_sdk.integrations.django import DjangoIntegration
+from .settings import *
+
+
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'agrar_xulosa',
+        'USER': '',
+        'PASSWORD': '',
+        'HOST': 'localhost',
+        'PORT': 5432,
+    }
+}
