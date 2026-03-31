@@ -8,6 +8,7 @@ from django.utils import timezone as django_timezone
 
 from drivers.models import Driver
 from orders.models import Client, Order, OrderStatus
+from dispatch.models import Assignment
 
 from .models import AnalyticsSettings, ClientAnalyticsSnapshot, DriverPerformanceSnapshot, MonthlyFinanceReport
 
@@ -127,8 +128,15 @@ def _rebuild_client_snapshots(base_qs, year: int, month: int) -> None:
     completed_weight = Decimal(settings.rating_completed_weight if settings else 70)
     quality_weight = Decimal(settings.rating_quality_weight if settings else 30)
     sla_penalty_weight = Decimal(settings.sla_breach_penalty_weight if settings else 20)
-    for client in Client.objects.filter(is_active=True):
-        qs = base_qs.filter(client=client)
+    client_ids = (
+        base_qs.exclude(client_id__isnull=True)
+        .values_list("client_id", flat=True)
+        .distinct()
+    )
+    if not client_ids:
+        return
+    for client in Client.objects.filter(pk__in=client_ids, is_active=True):
+        qs = base_qs.filter(client_id=client.pk)
         total_orders = qs.count()
         if total_orders == 0:
             continue
@@ -192,8 +200,15 @@ def _is_sla_breached(order: Order, sla_minutes: int, settings: AnalyticsSettings
 
 
 def _rebuild_driver_snapshots(base_qs, year: int, month: int) -> None:
-    for driver in Driver.objects.all():
-        assignments = driver.assignments.filter(order__in=base_qs).select_related("order")
+    driver_ids = (
+        Assignment.objects.filter(order__in=base_qs)
+        .values_list("driver_id", flat=True)
+        .distinct()
+    )
+    if not driver_ids:
+        return
+    for driver in Driver.objects.filter(pk__in=driver_ids):
+        assignments = Assignment.objects.filter(driver=driver, order__in=base_qs).select_related("order")
         total_orders = assignments.count()
         if total_orders == 0:
             continue
@@ -210,9 +225,16 @@ def _rebuild_driver_snapshots(base_qs, year: int, month: int) -> None:
         ).aggregate(value=Sum("order__driver_fee"))["value"] or Decimal("0")
         on_time_rate = Decimal(completed_orders * 100 / total_orders).quantize(Decimal("0.01"))
         avg_delivery = assignments.aggregate(
-            value=Avg(models.ExpressionWrapper(models.F("order__delivered_at") - models.F("order__pickup_time"), output_field=models.DurationField()))
+            value=Avg(
+                models.ExpressionWrapper(
+                    models.F("order__delivered_at") - models.F("order__pickup_time"),
+                    output_field=models.DurationField(),
+                )
+            )
         )["value"]
         avg_delivery_minutes = int(avg_delivery.total_seconds() // 60) if avg_delivery else 0
+        if avg_delivery_minutes < 0:
+            avg_delivery_minutes = 0
         rating_score = (
             Decimal("70") * (on_time_rate / Decimal("100"))
             + Decimal("20") * (Decimal(completed_orders) / Decimal(total_orders))

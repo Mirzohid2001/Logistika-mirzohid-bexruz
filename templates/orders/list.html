@@ -7,6 +7,13 @@
   {% if safe_mode %}
     <p class="muted" style="margin-top:6px">Xavfsiz rejim faol: ba'zi legacy raqam qiymatlari normallashtirildi.</p>
   {% endif %}
+  <p class="muted" style="margin-top:10px;font-size:0.82rem">
+    <span class="status-pill status-pill--new">Yangi / Taklif</span>
+    <span class="status-pill status-pill--assigned" style="margin-left:4px">Biriktirilgan</span>
+    <span class="status-pill status-pill--in-transit" style="margin-left:4px">Yo‘lda</span>
+    <span class="status-pill status-pill--completed" style="margin-left:4px">Yakunlangan</span>
+    <span class="status-pill status-pill--issue" style="margin-left:4px">Muammo / Bekor</span>
+  </p>
   <div class="actions">
     <a class="btn" href="{% url 'order-create' %}">Yangi buyurtma</a>
     <a class="btn btn-secondary" href="{% url 'ops-dashboard' %}">Operatsion panel</a>
@@ -73,15 +80,33 @@
             <td>{{ order.client_price }}</td>
             <td>{{ order.driver_fee }}</td>
             <td>{{ order.gross_margin }}</td>
-            <td><span class="status-pill">{% if safe_mode %}{{ order.status_display }}{% else %}{{ order.get_status_display }}{% endif %}</span></td>
+            <td>
+              {% if safe_mode %}
+                <span class="status-pill">{{ order.status_display }}</span>
+              {% else %}
+                {% if order.status == "new" or order.status == "offered" %}
+                  <span class="status-pill status-pill--new">{{ order.get_status_display }}</span>
+                {% elif order.status == "assigned" %}
+                  <span class="status-pill status-pill--assigned">{{ order.get_status_display }}</span>
+                {% elif order.status == "in_transit" %}
+                  <span class="status-pill status-pill--in-transit">{{ order.get_status_display }}</span>
+                {% elif order.status == "completed" %}
+                  <span class="status-pill status-pill--completed">{{ order.get_status_display }}</span>
+                {% elif order.status == "issue" or order.status == "canceled" %}
+                  <span class="status-pill status-pill--issue">{{ order.get_status_display }}</span>
+                {% else %}
+                  <span class="status-pill">{{ order.get_status_display }}</span>
+                {% endif %}
+              {% endif %}
+            </td>
             <td>
               {% if not safe_mode and order.status == "in_transit" %}
                 {% if order.live_ping_age_sec is None %}
-                  <span class="status-pill custody-risk">Live yo‘q</span>
+                  <span class="status-pill status-pill--live-missing">Live yo‘q</span>
                 {% elif order.live_ping_stale %}
-                  <span class="status-pill" style="background:#fef3c7;color:#92400e;border-color:#f59e0b">Eskirgan ({{ order.live_ping_age_label }})</span>
+                  <span class="status-pill status-pill--live-stale">Eskirgan ({{ order.live_ping_age_label }})</span>
                 {% else %}
-                  <span class="status-pill" style="background:#dcfce7;color:#166534;border-color:#22c55e">Aktiv ({{ order.live_ping_age_label }})</span>
+                  <span class="status-pill status-pill--live-ok">Aktiv ({{ order.live_ping_age_label }})</span>
                 {% endif %}
               {% else %}
                 —

@@ -21,3 +21,7 @@ class LocationPing(models.Model):
 
     class Meta:
         ordering = ["-captured_at"]
+        indexes = [
+            models.Index(fields=["order", "captured_at"]),
+            models.Index(fields=["driver", "captured_at"]),
+        ]

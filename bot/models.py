@@ -49,6 +49,9 @@ class DriverOnboardingState(models.Model):
 
     class Meta:
         ordering = ["-updated_at"]
+        indexes = [
+            models.Index(fields=["telegram_user_id", "is_active"]),
+        ]
 
 
 class TelegramGroupConfig(models.Model):

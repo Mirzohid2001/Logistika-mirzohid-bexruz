@@ -135,7 +135,31 @@ def _custody_cells_for_list(
 @staff_member_required
 def order_list(request):
     try:
-        qs = Order.objects.select_related("client").order_by("-created_at")
+        qs = (
+            Order.objects.select_related("client")
+            .only(
+                "id",
+                "from_location",
+                "to_location",
+                "client__name",
+                "cargo_type",
+                "weight_ton",
+                "loaded_quantity",
+                "loaded_quantity_uom",
+                "delivered_quantity",
+                "delivered_quantity_uom",
+                "density_kg_per_liter",
+                "delivered_density_kg_per_liter",
+                "client_price",
+                "driver_fee",
+                "fuel_cost",
+                "extra_cost",
+                "penalty_amount",
+                "status",
+                "created_at",
+            )
+            .order_by("-created_at")
+        )
         status = (request.GET.get("status") or "").strip()
         if status in {c[0] for c in OrderStatus.choices}:
             qs = qs.filter(status=status)

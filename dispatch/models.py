@@ -14,6 +14,9 @@ class Assignment(models.Model):
 
     class Meta:
         ordering = ["-assigned_at"]
+        indexes = [
+            models.Index(fields=["driver", "order"]),
+        ]
 
 
 class DriverOfferDecision(models.TextChoices):

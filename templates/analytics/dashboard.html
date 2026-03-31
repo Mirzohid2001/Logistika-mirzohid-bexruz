@@ -206,8 +206,20 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-  const financeData = JSON.parse(document.getElementById("finance-chart-data").textContent);
-  const clientData = JSON.parse(document.getElementById("client-chart-data").textContent);
+  function parseJsonSafe(id) {
+    const el = document.getElementById(id);
+    if (!el) return null;
+    try {
+      const txt = el.textContent || el.innerText || "";
+      if (!txt.trim()) return null;
+      return JSON.parse(txt);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  const financeData = parseJsonSafe("finance-chart-data") || { labels: [] };
+  const clientData = parseJsonSafe("client-chart-data") || { labels: [] };
 
   const financeCtx = document.getElementById("financeChart");
   const financeEmpty = document.getElementById("financeChartEmpty");
@@ -246,9 +258,9 @@
     clientEmpty.style.display = "block";
   }
 
-  const mapPoints = JSON.parse(document.getElementById("map-points-data").textContent);
+  const mapPoints = parseJsonSafe("map-points-data") || [];
   const mapNode = document.getElementById("liveMap");
-  if (mapNode) {
+  if (mapNode && Array.isArray(mapPoints) && mapPoints.length > 0) {
     const map = L.map(mapNode).setView([41.31, 69.24], 10);
     L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { maxZoom: 20, attribution: '&copy; OSM &copy; CARTO', subdomains: 'abcd' }).addTo(map);
     const bounds = [];
@@ -260,6 +272,8 @@
     if (bounds.length > 0) {
       map.fitBounds(bounds, { padding: [20, 20] });
     }
+  } else if (mapNode) {
+    mapNode.innerHTML = "<div class='muted' style='padding:14px'>Shofyor lokatsiyasi uchun maʼlumot topilmadi.</div>";
   }
 </script>
 {% endblock %}

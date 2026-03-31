@@ -98,7 +98,27 @@
             {% endfor %}
           </td>
           <td>{{ row.active_assignments }}</td>
-          <td>{% if row.snapshot %}{{ row.snapshot.rating_score }}{% else %}-{% endif %}</td>
+          <td>
+            <div>
+              {% if row.driver.rating_score %}
+                <b>{{ row.driver.rating_score }}</b> / 100
+              {% else %}
+                -
+              {% endif %}
+            </div>
+            <div class="muted" style="font-size:12px;margin-top:4px">
+              {% if row.review_avg %}
+                {{ row.review_avg }}★ ({{ row.review_count }} izoh)
+              {% else %}
+                Izoh yo‘q
+              {% endif %}
+            </div>
+            {% if row.last_review %}
+              <div class="muted" style="font-size:11px;margin-top:4px;max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                “{{ row.last_review.comment }}”
+              </div>
+            {% endif %}
+          </td>
           <td>{% if row.snapshot %}{{ row.snapshot.on_time_rate }}%{% else %}-{% endif %}</td>
           <td>{% if row.snapshot %}{{ row.snapshot.monthly_earnings }}{% else %}-{% endif %}</td>
           <td>{% if row.snapshot %}{{ row.snapshot.yearly_earnings }}{% else %}-{% endif %}</td>

@@ -20,12 +20,14 @@ from tracking.models import LocationPing
 from .forms import DriverForm, VehicleForm
 from .models import (
     Driver,
+    DriverDeliveryReview,
     DriverStatus,
     DriverVerificationAudit,
     DriverVerificationAuditAction,
     DriverVerificationStatus,
     Vehicle,
 )
+from .services import get_driver_review_aggregates
 
 
 def _driver_doc_score(driver: Driver) -> dict:
@@ -147,6 +149,7 @@ def driver_list(request):
     doc_expiry = str(request.GET.get("expiry", "all")).strip()
 
     drivers = list(Driver.objects.prefetch_related("vehicles").all())
+    driver_ids = [d.id for d in drivers]
     latest_snapshots = {}
     for row in DriverPerformanceSnapshot.objects.order_by("driver_id", "-period_year", "-period_month"):
         if row.driver_id not in latest_snapshots:
@@ -155,6 +158,17 @@ def driver_list(request):
     for ping in LocationPing.objects.order_by("driver_id", "-captured_at"):
         if ping.driver_id not in latest_locations:
             latest_locations[ping.driver_id] = ping
+
+    # So'nggi baho va izohlar (har bir haydovchi uchun bitta eng so'nggi sharh)
+    latest_reviews: dict[int, DriverDeliveryReview] = {}
+    if driver_ids:
+        for review in (
+            DriverDeliveryReview.objects.filter(driver_id__in=driver_ids)
+            .order_by("driver_id", "-created_at")
+            .only("driver_id", "stars", "comment", "created_at")
+        ):
+            if review.driver_id not in latest_reviews:
+                latest_reviews[review.driver_id] = review
 
     rows = []
     for driver in drivers:
@@ -165,6 +179,8 @@ def driver_list(request):
         doc = _driver_doc_score(driver)
         if doc_expiry != "all" and doc["expiry_state"] != doc_expiry:
             continue
+        review_count, review_avg = get_driver_review_aggregates(driver)
+        last_review = latest_reviews.get(driver.id)
         rows.append(
             {
                 "driver": driver,
@@ -177,6 +193,9 @@ def driver_list(request):
                 "doc_score": doc["score"],
                 "doc_expiry_state": doc["expiry_state"],
                 "doc_missing_summary": doc["missing_summary"],
+                "review_count": review_count,
+                "review_avg": review_avg,
+                "last_review": last_review,
             }
         )
     rows.sort(

@@ -866,6 +866,56 @@ tbody tr:last-child td {
   box-shadow: 0 1px 2px rgba(30, 64, 175, 0.06);
 }
 
+.status-pill--new,
+.status-pill--offered {
+  background: linear-gradient(180deg, #fefce8 0%, #fef9c3 100%);
+  border-color: #facc15;
+  color: #854d0e;
+}
+
+.status-pill--assigned {
+  background: linear-gradient(180deg, #e0f2fe 0%, #bae6fd 100%);
+  border-color: #38bdf8;
+  color: #075985;
+}
+
+.status-pill--in-transit {
+  background: linear-gradient(180deg, #dbeafe 0%, #bfdbfe 100%);
+  border-color: #60a5fa;
+  color: #1d4ed8;
+}
+
+.status-pill--completed {
+  background: linear-gradient(180deg, #ecfdf5 0%, #bbf7d0 100%);
+  border-color: #22c55e;
+  color: #166534;
+}
+
+.status-pill--issue,
+.status-pill--canceled {
+  background: linear-gradient(180deg, #fef2f2 0%, #fee2e2 100%);
+  border-color: #f87171;
+  color: #b91c1c;
+}
+
+.status-pill--live-ok {
+  background: linear-gradient(180deg, #dcfce7 0%, #bbf7d0 100%);
+  border-color: #22c55e;
+  color: #166534;
+}
+
+.status-pill--live-stale {
+  background: linear-gradient(180deg, #fffbeb 0%, #fef3c7 100%);
+  border-color: #facc15;
+  color: #92400e;
+}
+
+.status-pill--live-missing {
+  background: linear-gradient(180deg, #fef2f2 0%, #fee2e2 100%);
+  border-color: #fecaca;
+  color: #b91c1c;
+}
+
 /* ——— Stat kartalar ——— */
 .stats-grid {
   display: grid;

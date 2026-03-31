@@ -103,7 +103,25 @@
             <td>#{{ order.pk }}</td>
             <td>{% if safe_mode %}{{ order.client_name }}{% else %}{{ order.client|default:"-" }}{% endif %}</td>
             <td>{{ order.from_location }} -> {{ order.to_location }}</td>
-            <td><span class="status-pill">{% if safe_mode %}{{ order.status_display }}{% else %}{{ order.get_status_display }}{% endif %}</span></td>
+            <td>
+              {% if safe_mode %}
+                <span class="status-pill">{{ order.status_display }}</span>
+              {% else %}
+                {% if order.status == "new" or order.status == "offered" %}
+                  <span class="status-pill status-pill--new">{{ order.get_status_display }}</span>
+                {% elif order.status == "assigned" %}
+                  <span class="status-pill status-pill--assigned">{{ order.get_status_display }}</span>
+                {% elif order.status == "in_transit" %}
+                  <span class="status-pill status-pill--in-transit">{{ order.get_status_display }}</span>
+                {% elif order.status == "completed" %}
+                  <span class="status-pill status-pill--completed">{{ order.get_status_display }}</span>
+                {% elif order.status == "issue" or order.status == "canceled" %}
+                  <span class="status-pill status-pill--issue">{{ order.get_status_display }}</span>
+                {% else %}
+                  <span class="status-pill">{{ order.get_status_display }}</span>
+                {% endif %}
+              {% endif %}
+            </td>
             <td>{{ order.client_price }}</td>
             <td><a class="btn btn-secondary" href="{% url 'order-detail' order.pk %}">Ko‘rish</a></td>
           </tr>

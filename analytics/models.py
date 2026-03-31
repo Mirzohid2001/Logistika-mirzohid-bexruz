@@ -138,3 +138,7 @@ class AlertEvent(models.Model):
     class Meta:
         ordering = ["-created_at"]
         unique_together = ("order", "alert_type", "threshold_minutes")
+        indexes = [
+            models.Index(fields=["order", "alert_type"]),
+            models.Index(fields=["alert_type", "resolved"]),
+        ]
