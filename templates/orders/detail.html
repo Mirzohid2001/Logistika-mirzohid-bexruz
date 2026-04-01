@@ -142,6 +142,43 @@
   </div>
 </div>
 
+{% if big_order_allocation %}
+<div class="card">
+  <h2 class="title">Katta zakaz taqsimlash (tavsiya)</h2>
+  <p class="muted" style="margin-bottom:8px">
+    Umumiy yuk: {{ order.weight_ton }} tonna (~{{ order.weight_ton|floatformat:2|add:""|default:"" }} t) ·
+    algoritm haydovchi reytingi va mashina sig‘imiga qarab taxminiy taqsimlashni ko‘rsatadi.
+  </p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Shofyor</th>
+          <th>Mashina</th>
+          <th>Tavsiya yuk (kg)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for drv, kg in big_order_allocation.allocations %}
+          <tr>
+            <td>{{ drv.full_name }}</td>
+            <td>{% firstof drv.vehicles.first.plate_number "-" %}</td>
+            <td>{{ kg }}</td>
+          </tr>
+        {% endfor %}
+        <tr>
+          <td colspan="2"><strong>Qoldiq</strong></td>
+          <td><strong>{{ big_order_allocation.remaining_kg }} kg</strong></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="muted" style="margin-top:8px">
+    Bu faqat tavsiya. Yakuniy qaror va reys rejalashtirish dispetcher/ops tomonidan qabul qilinadi.
+  </p>
+</div>
+{% endif %}
+
 <div class="card">
   <h2 class="title">Qo‘shimcha xarajatlar (buxgalteriya)</h2>
   <form method="post" action="{% url 'order-expense-add' order.pk %}" class="row g-3 align-items-end">

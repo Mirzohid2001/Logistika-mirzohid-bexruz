@@ -39,14 +39,31 @@
         <span class="nav-toggle-bars" aria-hidden="true"></span>
       </button>
       <div class="nav-backdrop" id="nav-backdrop" aria-hidden="true"></div>
+      {% with current=request.resolver_match.url_name %}
       <nav class="nav nav--main" id="primary-nav" aria-label="Asosiy menyu">
-        <a class="nav-link" href="{% url 'order-list' %}">Buyurtmalar</a>
-        <a class="nav-link" href="{% url 'client-list' %}">Klientlar</a>
-        <a class="nav-link" href="{% url 'driver-list' %}">Shofyorlar</a>
+        <a
+          class="nav-link{% if current in 'order-list order-detail order-live-location' %} nav-link--active{% endif %}"
+          href="{% url 'order-list' %}"
+        >Buyurtmalar</a>
+        <a
+          class="nav-link{% if current in 'client-list client-create client-edit clients-rating-report clients-monthly-yearly-report' %} nav-link--active{% endif %}"
+          href="{% url 'client-list' %}"
+        >Klientlar</a>
+        <a
+          class="nav-link{% if current in 'driver-list driver-detail driver-create' %} nav-link--active{% endif %}"
+          href="{% url 'driver-list' %}"
+        >Shofyorlar</a>
         <a class="nav-link nav-link-accent" href="{% url 'order-create' %}">+ Yangi buyurtma</a>
-        <a class="nav-link" href="{% url 'ops-dashboard' %}">Operatsion panel</a>
-        <a class="nav-link" href="{% url 'live-fleet-map' %}">Live flot</a>
+        <a
+          class="nav-link{% if current in 'ops-dashboard generate-monthly-report accounting-pnl-report' %} nav-link--active{% endif %}"
+          href="{% url 'ops-dashboard' %}"
+        >Operatsion panel</a>
+        <a
+          class="nav-link{% if current in 'live-fleet-map' %} nav-link--active{% endif %}"
+          href="{% url 'live-fleet-map' %}"
+        >Live flot</a>
       </nav>
+      {% endwith %}
     </div>
   </header>
 

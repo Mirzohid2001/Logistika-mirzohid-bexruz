@@ -540,7 +540,10 @@ def _handle_callback(callback_query: dict, signature: str = "", source_ip: str =
 
         driver = Driver.objects.filter(telegram_user_id=user_id).first()
         if not driver:
-            _safe_answer(callback_id, "Avval /start bosing va raqamni yuboring")
+            _safe_answer(
+                callback_id,
+                "Siz haydovchi sifatida ro‘yxatdan o‘tmagansiz. Zakaz qabul qilish uchun avval /start bosib telefon raqamingizni yuboring.",
+            )
             return
 
         if action in {"start", "finish_req"}:

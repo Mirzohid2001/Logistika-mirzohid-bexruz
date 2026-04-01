@@ -37,6 +37,10 @@
             <div class="row">
               <label for="{{ form.weight_ton.id_for_label }}">{{ form.weight_ton.label }}</label>
               {{ form.weight_ton }}{{ form.weight_ton.errors }}
+              <p id="weightSplitHint" class="muted" style="margin-top:4px;font-size:12px">
+                Flotta preseti: 10t / 20t / 30t. Umumiy yuk og‘irligini kg da kiritsangiz, sistema taxminiy nechta
+                moshinaga bo‘lishni ko‘rsatadi (faqat tavsiya, yakuniy qaror dispetcherda).
+              </p>
             </div>
           </div>
         </section>
@@ -317,6 +321,95 @@
     }
 
     if (clientEl) clientEl.addEventListener("change", update);
+  })();
+</script>
+
+<script>
+  (function () {
+    const input = document.getElementById("id_weight_ton");
+    const hint = document.getElementById("weightSplitHint");
+    if (!input || !hint) return;
+
+    // Flotadagi tipik sig'im presetlari (kg) — kerak bo'lsa keyin sozlamaga ko'chiramiz.
+    const capacityPresets = [30000, 20000, 10000]; // 30t, 20t, 10t (kg da)
+
+    function formatKg(v) {
+      return v.toLocaleString("ru-RU");
+    }
+
+    function suggestSplit(totalKg) {
+      if (!Number.isFinite(totalKg) || totalKg <= 0) return null;
+      const loads = [];
+      let remaining = totalKg;
+      let guard = 0;
+      while (remaining > 0 && guard < 50) {
+        guard += 1;
+        const candidate = capacityPresets.find((c) => c <= remaining) || capacityPresets[capacityPresets.length - 1];
+        loads.push(candidate);
+        remaining -= candidate;
+        if (remaining <= 0) break;
+        if (remaining < capacityPresets[capacityPresets.length - 1]) {
+          loads.push(remaining);
+          remaining = 0;
+          break;
+        }
+      }
+      return loads;
+    }
+
+    function onChange() {
+      const raw = (input.value || "").replace(/\s+/g, "").replace(",", ".");
+      const v = Number(raw);
+      if (!raw || !Number.isFinite(v) || v <= 0) {
+        hint.textContent =
+          "Flotta preseti: 10t / 20t / 30t. Umumiy yuk og‘irligini kg da kiriting (masalan 25000) — sistema taxminiy nechta moshinaga bo‘lishni ko‘rsatadi.";
+        return;
+      }
+      const loads = suggestSplit(v);
+      if (!loads || loads.length === 0) {
+        hint.textContent = "Yuk og‘irligi noto‘g‘ri formatda.";
+        return;
+      }
+      if (loads.length === 1) {
+        const t = loads[0];
+        let note = "";
+        if (v >= 80000) {
+          note = " · Diqqat: juda katta yuk — flotta va marshrutni qo‘lda tekshiring.";
+        } else if (v <= 3000) {
+          note = " · Ehtimol bitta kichik moshina yoki yengil transport yetarli.";
+        }
+        hint.textContent =
+          "Tavsiya: bitta moshina yetadi — ≈ " + formatKg(t) + " kg (taxminiy)." + note;
+        return;
+      }
+      const counts = {};
+      loads.forEach((c) => {
+        counts[c] = (counts[c] || 0) + 1;
+      });
+      const parts = Object.keys(counts)
+        .sort((a, b) => Number(b) - Number(a))
+        .map((kgStr) => {
+          const kg = Number(kgStr);
+          const n = counts[kgStr];
+          return n + " × " + formatKg(kg) + " kg";
+        });
+      let note = "";
+      if (v >= 80000) {
+        note = " · Diqqat: juda katta yuk — flotta va marshrutni qo‘lda tekshiring.";
+      }
+      hint.textContent =
+        "Tavsiya: taxminan " +
+        loads.length +
+        " ta reys/moshina — " +
+        parts.join(" + ") +
+        " (umumiy " +
+        formatKg(v) +
+        " kg)." +
+        note;
+    }
+
+    input.addEventListener("input", onChange);
+    input.addEventListener("blur", onChange);
   })();
 </script>
 {% endblock %}

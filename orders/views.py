@@ -20,6 +20,7 @@ from drivers.models import DriverDeliveryReview, DriverStatus
 from drivers.services import get_driver_review_aggregates, recompute_driver_rating_score
 from bot.models import TelegramMessageLog
 from dispatch.services import assign_order
+from dispatch.allocation import AllocationResult, DriverCapacity, calculate_big_order_allocation
 from pricing.models import PriceQuote, TenderBid, TenderSession
 from pricing.services import build_price_breakdown, evaluate_tender_bid, suggest_price
 
@@ -437,6 +438,12 @@ def order_detail(request, pk: int):
         rc, ra = get_driver_review_aggregates(assignment.driver)
         driver_review_stats = {"count": rc, "avg_stars": ra}
 
+    big_alloc: AllocationResult | None = None
+    try:
+        big_alloc = _calculate_big_order_allocation_cached(order)
+    except Exception:
+        big_alloc = None
+
     return render(
         request,
         "orders/detail.html",
@@ -467,6 +474,7 @@ def order_detail(request, pk: int):
             "tender_duration_max": t_dur_max,
             "tender_duration_default": t_dur_default,
             "split_shipment_max_parts": split_max,
+            "big_order_allocation": big_alloc,
         },
     )
 
@@ -1399,6 +1407,10 @@ def order_driver_response_approve(request, pk: int, response_id: int):
         # UI uchun xabarlar (transaction yakunlangandan keyin).
         if changed:
             messages.success(request, f"{response.driver.full_name} tasdiqlandi va orderga biriktirildi.")
+            try:
+                _notify_big_order_allocation_if_applicable(locked_order)
+            except Exception:
+                pass
         else:
             messages.warning(request, "Shofyor band yoki mos emas (zanyat).")
     return redirect("order-detail", pk=order.pk)
@@ -1423,6 +1435,68 @@ def order_driver_response_decline(request, pk: int, response_id: int):
                 locked_response.save(update_fields=["approval_status", "reviewed_by", "reviewed_at", "note"])
         messages.success(request, "Qabul so'rovi rad etildi.")
     return redirect("order-detail", pk=order.pk)
+
+
+def _notify_big_order_allocation_if_applicable(order: Order) -> None:
+    from dispatch.models import Assignment
+
+    min_ton = Decimal(str(getattr(dj_settings, "BIG_ORDER_MIN_TON", 20) or 20))
+    if not order.weight_ton or Decimal(order.weight_ton) < min_ton:
+        return
+
+    qs = (
+        Assignment.objects.select_related("driver")
+        .filter(order=order)
+    )
+    drivers: list[DriverCapacity] = []
+    for a in qs:
+        driver = a.driver
+        vehicle = driver.vehicles.order_by("-capacity_ton").first()
+        if not vehicle or not vehicle.capacity_ton:
+            continue
+        cap_kg = (Decimal(vehicle.capacity_ton) * Decimal("1000")).quantize(Decimal("1"))
+        if cap_kg <= 0:
+            continue
+        drivers.append(DriverCapacity(driver=driver, capacity_kg=cap_kg))
+
+    if not drivers:
+        return
+
+    result = calculate_big_order_allocation(order, drivers=drivers)
+    from bot.services import send_ops_notification
+
+    lines: list[str] = []
+    for drv, kg in result.allocations:
+        lines.append(f"{drv.full_name}: {kg} kg")
+    note = (
+        "Katta zakaz taqsimlash (tavsiya).\n"
+        + "\n".join(lines)
+        + f"\nQoldiq: {result.remaining_kg} kg"
+    )
+    send_ops_notification("big_order_allocation", order=order, driver=None, note=note)
+
+
+def _calculate_big_order_allocation_cached(order: Order) -> AllocationResult | None:
+    min_ton = Decimal(str(getattr(dj_settings, "BIG_ORDER_MIN_TON", 20) or 20))
+    if not order.weight_ton or Decimal(order.weight_ton) < min_ton:
+        return None
+
+    qs = Assignment.objects.select_related("driver").filter(order=order)
+    drivers: list[DriverCapacity] = []
+    for a in qs:
+        driver = a.driver
+        vehicle = driver.vehicles.order_by("-capacity_ton").first()
+        if not vehicle or not vehicle.capacity_ton:
+            continue
+        cap_kg = (Decimal(vehicle.capacity_ton) * Decimal("1000")).quantize(Decimal("1"))
+        if cap_kg <= 0:
+            continue
+        drivers.append(DriverCapacity(driver=driver, capacity_kg=cap_kg))
+
+    if not drivers:
+        return None
+
+    return calculate_big_order_allocation(order, drivers=drivers)
 
 
 @staff_member_required

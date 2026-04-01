@@ -337,6 +337,15 @@ body.nav-open .nav-backdrop {
     0 8px 28px rgba(14, 165, 233, 0.45);
 }
 
+.nav-link--active {
+  background: rgba(248, 250, 252, 0.18);
+  color: #fff;
+  border-color: rgba(248, 250, 252, 0.3);
+  box-shadow:
+    0 0 0 1px rgba(15, 23, 42, 0.24) inset,
+    0 10px 30px rgba(15, 23, 42, 0.55);
+}
+
 @media (max-width: 960px) {
   .nav-toggle {
     display: inline-flex;
@@ -851,6 +860,60 @@ tbody tr:hover {
 
 tbody tr:last-child td {
   border-bottom: none;
+}
+
+/* ——— Mobil adaptiv tuzatishlar ——— */
+@media (max-width: 768px) {
+  .topbar-inner {
+    gap: 6px;
+  }
+
+  .nav--main .nav-link {
+    padding: 8px 10px;
+    font-size: 0.8rem;
+  }
+
+  .page {
+    padding-top: 16px;
+  }
+
+  .order-create-layout {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .order-create-aside {
+    width: 100%;
+  }
+
+  .map-panel {
+    margin-top: 4px;
+  }
+
+  .meta-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .table-wrap table {
+    min-width: 520px;
+  }
+
+  .fleet-live-map {
+    height: min(60vh, 520px);
+  }
+
+  .order-create-head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .order-create-head-actions {
+    width: 100%;
+    display: flex;
+    justify-content: flex-end;
+  }
 }
 
 .status-pill {
