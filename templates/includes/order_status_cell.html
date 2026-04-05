@@ -1,0 +1,18 @@
+{% comment %}Reusable status pill for Order (safe_mode or normal){% endcomment %}
+{% if safe_mode %}
+  <span class="status-pill">{{ order.status_display }}</span>
+{% else %}
+  {% if order.status == "new" or order.status == "offered" %}
+    <span class="status-pill status-pill--new">{{ order.get_status_display }}</span>
+  {% elif order.status == "assigned" %}
+    <span class="status-pill status-pill--assigned">{{ order.get_status_display }}</span>
+  {% elif order.status == "in_transit" %}
+    <span class="status-pill status-pill--in-transit">{{ order.get_status_display }}</span>
+  {% elif order.status == "completed" %}
+    <span class="status-pill status-pill--completed">{{ order.get_status_display }}</span>
+  {% elif order.status == "issue" or order.status == "canceled" %}
+    <span class="status-pill status-pill--issue">{{ order.get_status_display }}</span>
+  {% else %}
+    <span class="status-pill">{{ order.get_status_display }}</span>
+  {% endif %}
+{% endif %}

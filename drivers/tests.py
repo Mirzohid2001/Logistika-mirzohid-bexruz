@@ -81,7 +81,7 @@ class DriverViewsTests(TestCase):
 
         list_response = self.client.get(reverse("driver-list"))
         self.assertEqual(list_response.status_code, 200)
-        self.assertContains(list_response, "Shofyorlar ro'yxati")
+        self.assertContains(list_response, "va analitikasi")
         self.assertContains(list_response, "30 kunda tugaydi")
 
         detail_response = self.client.get(reverse("driver-detail", args=[self.driver.pk]))

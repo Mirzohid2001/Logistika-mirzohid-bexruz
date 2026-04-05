@@ -1,5 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Buyurtmalar | Shofir{% endblock %}
+{% block breadcrumbs %}
+<nav class="breadcrumb-nav" aria-label="Yo‘l xaritasi">
+  <a href="{% url 'home' %}">Bosh sahifa</a>
+  <span class="breadcrumb-nav__sep" aria-hidden="true">/</span>
+  <span class="breadcrumb-nav__here">Buyurtmalar</span>
+</nav>
+{% endblock %}
 {% block content %}
 <div class="card">
   <h1 class="title">Buyurtmalar ro‘yxati</h1>
@@ -18,10 +25,91 @@
     <a class="btn" href="{% url 'order-create' %}">Yangi buyurtma</a>
     <a class="btn btn-secondary" href="{% url 'ops-dashboard' %}">Operatsion panel</a>
   </div>
+
+  {% if not safe_mode %}
+  <form method="get" class="order-list-filters" action="{% url 'order-list' %}">
+    {% if view_mode == 'minimal' %}<input type="hidden" name="view" value="minimal">{% endif %}
+    {% if preset %}<input type="hidden" name="preset" value="{{ preset }}">{% endif %}
+    <div class="order-list-filters__search">
+      <label class="form-label small muted mb-1" for="id_q">Tez qidiruv</label>
+      <div class="row g-2 align-items-end flex-wrap">
+        <div class="col-12 col-md-6 col-lg-5">
+          <input type="search" name="q" id="id_q" class="form-control form-control-sm" placeholder="ID, telefon, haydovchi, yo‘nalish…" value="{{ search_q|default:'' }}" autocomplete="off">
+        </div>
+        <div class="col-auto">
+          <button type="submit" class="btn btn-sm btn-primary">Qidiruv</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="saved-filter-bar" role="group" aria-label="Tezkor filtrlar">
+      <span class="saved-filter-bar__label muted small">Tezkor:</span>
+      <a class="filter-chip{% if preset == 'today' %} filter-chip--active{% endif %}" href="{% url 'order-list' %}?preset=today{% if view_mode == 'minimal' %}&amp;view=minimal{% endif %}">Bugungi reyslar</a>
+      <a class="filter-chip{% if preset == 'delayed' %} filter-chip--active{% endif %}" href="{% url 'order-list' %}?preset=delayed{% if view_mode == 'minimal' %}&amp;view=minimal{% endif %}">Kechikkanlar (SLA)</a>
+      <a class="filter-chip{% if preset == 'active' %} filter-chip--active{% endif %}" href="{% url 'order-list' %}?preset=active{% if view_mode == 'minimal' %}&amp;view=minimal{% endif %}">Faol buyurtmalar</a>
+      <a class="filter-chip" href="{% url 'order-list' %}{% if view_mode == 'minimal' %}?view=minimal{% endif %}">Hammasi</a>
+    </div>
+
+    <div class="row g-2 align-items-end flex-wrap" style="margin-top:12px">
+      <div class="col-auto">
+        <label class="form-label small muted mb-0" for="id_status">Holat</label>
+        <select name="status" id="id_status" class="form-select form-select-sm">
+          <option value="">Barchasi</option>
+          {% for val, label in order_status_choices_uz %}
+            <option value="{{ val }}" {% if status_filter == val %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto d-flex gap-1 align-items-end">
+        <button type="submit" class="btn btn-secondary btn-sm">Qo‘llash</button>
+        <a class="btn btn-outline-secondary btn-sm" href="{% url 'order-list' %}{% if view_mode == 'minimal' %}?view=minimal{% endif %}">Tozalash</a>
+      </div>
+      <div class="col-auto ms-md-auto">
+        <span class="muted small me-2">Jadval:</span>
+        {% if view_mode == 'minimal' %}
+          <a class="btn btn-sm btn-outline-primary" href="?{% if request_params %}{{ request_params }}&amp;{% endif %}view=full">To‘liq ustunlar</a>
+        {% else %}
+          <a class="btn btn-sm btn-outline-primary" href="?{% if request_params %}{{ request_params }}&amp;{% endif %}view=minimal">Minimal</a>
+        {% endif %}
+      </div>
+    </div>
+
+    <details class="order-list-more-filters" {% if date_filter or driver_filter or client_filter %}open{% endif %}>
+      <summary>Qo‘shimcha filtrlash</summary>
+      <div class="row g-2 align-items-end flex-wrap mt-2">
+        <div class="col-auto">
+          <label class="form-label small muted mb-0" for="id_date">Sana (yuk olish)</label>
+          <input type="date" name="date" id="id_date" class="form-control form-control-sm" value="{{ date_filter|default:'' }}">
+        </div>
+        <div class="col-auto">
+          <label class="form-label small muted mb-0" for="id_driver">Haydovchi</label>
+          <select name="driver" id="id_driver" class="form-select form-select-sm">
+            <option value="">Barchasi</option>
+            {% for d in drivers_for_filter %}
+              <option value="{{ d.pk }}" {% if driver_filter == d.pk|stringformat:"s" %}selected{% endif %}>{{ d.full_name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-auto">
+          <label class="form-label small muted mb-0" for="id_client">Mijoz</label>
+          <select name="client" id="id_client" class="form-select form-select-sm">
+            <option value="">Barchasi</option>
+            {% for c in clients_for_filter %}
+              <option value="{{ c.pk }}" {% if client_filter == c.pk|stringformat:"s" %}selected{% endif %}>{{ c.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-auto">
+          <button type="submit" class="btn btn-secondary btn-sm">Filtrlash</button>
+        </div>
+      </div>
+    </details>
+  </form>
+  {% else %}
   <form method="get" class="row g-2 align-items-end" style="margin-top:14px;max-width:520px">
     <div class="col-auto">
-      <label class="form-label small muted mb-0" for="id_status">Holat bo‘yicha</label>
-      <select name="status" id="id_status" class="form-select form-select-sm">
+      <label class="form-label small muted mb-0" for="id_status_safe">Holat bo‘yicha</label>
+      <select name="status" id="id_status_safe" class="form-select form-select-sm">
         <option value="">Barchasi</option>
         {% for val, label in order_status_choices %}
           <option value="{{ val }}" {% if status_filter == val %}selected{% endif %}>{{ label }}</option>
@@ -35,6 +123,7 @@
       {% endif %}
     </div>
   </form>
+  {% endif %}
 </div>
 
 <div class="card">
@@ -45,6 +134,8 @@
           <th>№</th>
           <th>Yo‘nalish</th>
           <th>Klient</th>
+          {% if not safe_mode %}<th>Shofyor</th>{% endif %}
+          {% if view_mode != 'minimal' or safe_mode %}
           <th>Yuk (reja)</th>
           <th>Yuklangan</th>
           <th>Topshirish</th>
@@ -52,8 +143,11 @@
           <th title="Tushum emas; maydon odatda 0">Klient maydoni</th>
           <th>Shofyor xizmat haqqi</th>
           <th title="client_price − chiqimlar; tushum 0 bo‘lsa manfiy bo‘lishi mumkin">Sof qoldiq</th>
+          {% endif %}
           <th>Holat</th>
+          {% if view_mode != 'minimal' and not safe_mode %}
           <th>Live</th>
+          {% endif %}
           <th>Harakat</th>
         </tr>
       </thead>
@@ -63,6 +157,10 @@
             <td>#{{ order.pk }}</td>
             <td>{{ order.from_location }} -> {{ order.to_location }}</td>
             <td>{% if safe_mode %}{{ order.client_name }}{% else %}{{ order.client|default:"-" }}{% endif %}</td>
+            {% if not safe_mode %}
+            <td>{% if order.assignment %}{{ order.assignment.driver.full_name }}{% else %}—{% endif %}</td>
+            {% endif %}
+            {% if view_mode != 'minimal' or safe_mode %}
             <td>{{ order.cargo_type }} ({{ order.weight_ton }}t)</td>
             {% if safe_mode %}
               <td>{{ order.custody_loaded }}</td>
@@ -80,27 +178,17 @@
             <td>{{ order.client_price }}</td>
             <td>{{ order.driver_fee }}</td>
             <td>{{ order.gross_margin }}</td>
+            {% endif %}
             <td>
               {% if safe_mode %}
                 <span class="status-pill">{{ order.status_display }}</span>
               {% else %}
-                {% if order.status == "new" or order.status == "offered" %}
-                  <span class="status-pill status-pill--new">{{ order.get_status_display }}</span>
-                {% elif order.status == "assigned" %}
-                  <span class="status-pill status-pill--assigned">{{ order.get_status_display }}</span>
-                {% elif order.status == "in_transit" %}
-                  <span class="status-pill status-pill--in-transit">{{ order.get_status_display }}</span>
-                {% elif order.status == "completed" %}
-                  <span class="status-pill status-pill--completed">{{ order.get_status_display }}</span>
-                {% elif order.status == "issue" or order.status == "canceled" %}
-                  <span class="status-pill status-pill--issue">{{ order.get_status_display }}</span>
-                {% else %}
-                  <span class="status-pill">{{ order.get_status_display }}</span>
-                {% endif %}
+                {% include "includes/order_status_cell.html" with order=order safe_mode=False %}
               {% endif %}
             </td>
+            {% if view_mode != 'minimal' and not safe_mode %}
             <td>
-              {% if not safe_mode and order.status == "in_transit" %}
+              {% if order.status == "in_transit" %}
                 {% if order.live_ping_age_sec is None %}
                   <span class="status-pill status-pill--live-missing">Live yo‘q</span>
                 {% elif order.live_ping_stale %}
@@ -112,11 +200,12 @@
                 —
               {% endif %}
             </td>
+            {% endif %}
             <td><a class="btn btn-secondary" href="{% url 'order-detail' order.pk %}">Ko‘rish</a></td>
           </tr>
         {% empty %}
           <tr>
-            <td colspan="13">Buyurtmalar hali mavjud emas.</td>
+            <td colspan="{% if safe_mode %}11{% elif view_mode == 'minimal' %}6{% else %}14{% endif %}">Buyurtmalar hali mavjud emas yoki filtrga mos kelmaydi.</td>
           </tr>
         {% endfor %}
       </tbody>
@@ -128,10 +217,10 @@
   <div class="row-inline">
     <span class="muted">Sahifa {{ page_obj.number }} / {{ page_obj.paginator.num_pages }}</span>
     {% if page_obj.has_previous %}
-      <a class="btn btn-secondary" href="?page={{ page_obj.previous_page_number }}{% if status_filter %}&amp;status={{ status_filter }}{% endif %}">Oldingi</a>
+      <a class="btn btn-secondary" href="?{% if request_params %}{{ request_params }}&amp;{% endif %}page={{ page_obj.previous_page_number }}">Oldingi</a>
     {% endif %}
     {% if page_obj.has_next %}
-      <a class="btn btn-secondary" href="?page={{ page_obj.next_page_number }}{% if status_filter %}&amp;status={{ status_filter }}{% endif %}">Keyingi</a>
+      <a class="btn btn-secondary" href="?{% if request_params %}{{ request_params }}&amp;{% endif %}page={{ page_obj.next_page_number }}">Keyingi</a>
     {% endif %}
   </div>
 </div>

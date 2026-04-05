@@ -5,7 +5,7 @@ import secrets
 import math
 import re
 from hmac import compare_digest
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from urllib.error import URLError
 
@@ -128,17 +128,25 @@ def _parse_driver_hajm_free_text(text: str) -> tuple[Decimal | None, str | None,
     return qty, uom, density, None
 
 
-_ONB_FIRST_TOTAL = 11
-_ONB_TRUCK_EXTRA_TOTAL = 6
-_ONB_DATE_HINT = (
-    "Quyidagi formatlardan <b>birini</b> yozing:\n"
-    "• <code>2024-05-01</code>\n"
-    "• <code>15.03.2024</code>"
-)
+_ONB_FIRST_TOTAL = 5
 _ONB_PHOTO_HINT = (
     "📎 <b>Clip</b> → <b>Rasm</b> yoki <b>Fotosurat</b>dan yuboring.\n"
     "Rasm aniq va to'liq ko'rinsin."
 )
+
+
+def _parse_capacity_kg(text: str) -> tuple[Decimal | None, str | None]:
+    raw = (text or "").strip().lower().replace(",", ".")
+    raw = re.sub(r"\s*kg\s*$", "", raw).strip()
+    if not raw:
+        return None, "Sig‘imni yozing (kg). Masalan: <code>12000</code>"
+    try:
+        kg = Decimal(raw)
+    except Exception:
+        return None, "Raqam noto‘g‘ri. Masalan: <code>12000</code> yoki <code>11500.5</code>"
+    if kg <= 0:
+        return None, "Musbat son kiriting (kg)."
+    return kg, None
 
 
 def _onb_progress_bar(current: int, total: int) -> str:
@@ -158,20 +166,6 @@ def _onb_first_block(current: int, emoji: str, title: str, body: str) -> str:
         f"{emoji} <b>{html.escape(title)}</b>\n\n"
         f"{body}"
     )
-
-
-def _onb_truck_block(current: int, emoji: str, title: str, body: str) -> str:
-    bar = html.escape(_onb_progress_bar(current, _ONB_TRUCK_EXTRA_TOTAL))
-    return (
-        "<b>🚛 Texnika (qo'shimcha)</b>\n"
-        f"<code>{bar}</code>\n\n"
-        f"{emoji} <b>{html.escape(title)}</b>\n\n"
-        f"{body}"
-    )
-
-
-def _onb_truck_mode(payload: dict) -> bool:
-    return bool((payload or {}).get("onb_truck_only"))
 
 
 @csrf_exempt
@@ -269,6 +263,33 @@ def _location_captured_at_from_message(message: dict | None) -> datetime:
     return django_timezone.now()
 
 
+def _telegram_user_id_for_location_message(message: dict) -> int:
+    """Telegram ba'zan edited_message da `from` qaytarmaydi; shaxsiy chatda chat.id == user id."""
+    user = message.get("from") or {}
+    uid = int(user.get("id", 0) or 0)
+    if uid:
+        return uid
+    chat = message.get("chat") or {}
+    if str(chat.get("type", "")).lower() == "private":
+        try:
+            return int(chat.get("id", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _is_live_location_telegram_event(location: dict, message: dict | None) -> bool:
+    """
+    Jonli joylashuv: birinchi xabarda `live_period` bo‘ladi; keyingi yangilanishlar `edited_message`.
+    Bunday holatda haydovchi yuklash nuqtasidan uzoqda bo‘lishi mumkin — masofa tekshiruvini qattiq qo‘llamaymiz.
+    """
+    if location.get("live_period") is not None:
+        return True
+    if message and message.get("edit_date"):
+        return True
+    return False
+
+
 def _save_location(telegram_user_id: int, location: dict, message: dict | None = None) -> None:
     driver = Driver.objects.filter(telegram_user_id=telegram_user_id).first()
     if not driver:
@@ -300,7 +321,11 @@ def _save_location(telegram_user_id: int, location: dict, message: dict | None =
             )
         return
     order_point = _extract_coords_text(assignment.order.from_location)
-    if order_point and prev_ping is None:
+    if (
+        order_point
+        and prev_ping is None
+        and not _is_live_location_telegram_event(location, message)
+    ):
         dist = _distance_km(lat, lon, order_point[0], order_point[1])
         if dist > settings.GPS_MAX_DISTANCE_FROM_ORDER_KM:
             send_chat_message(
@@ -1051,7 +1076,8 @@ def _handle_driver_command(message: dict) -> None:
         if active_state and not active_state.step.startswith("add_vehicle_"):
             send_chat_message(
                 chat_id,
-                "Hozir boshqa kiritish jarayoni ketayapti. Avval tugating.",
+                "Hozir hujjatlar yoki boshqa kiritish jarayoni ketayapti. Avval uni tugating — "
+                "keyin qo‘shimcha mashina uchun <code>/add_vehicle</code>.",
                 parse_mode="HTML",
                 reply_markup=driver_reply_keyboard_for_order(
                     _resolve_driver_order(driver, None), telegram_user_id=int(telegram_user_id)
@@ -1071,7 +1097,7 @@ def _handle_driver_command(message: dict) -> None:
 
         send_chat_message(
             chat_id,
-            "➕ <b>Yangi mashina qo‘shish</b>\n\n"
+            "➕ <b>Qo‘shimcha mashina</b> (birinchi avto botda ro‘yxatdan o‘tishda; ikkinchi va keyingi — shu yerda)\n\n"
             "Birinchi qadam: <b>davlat raqami</b>ni yuboring.\n"
             "Masalan: <code>80A123BC</code> (probelsiz, katta harf bilan).",
             parse_mode="HTML",
@@ -1476,9 +1502,11 @@ def _handle_driver_command(message: dict) -> None:
 def _handle_message(message: dict, signature: str = "", source_ip: str = "") -> None:
     user = message.get("from") or {}
     telegram_user_id = int(user.get("id", 0) or 0)
+    location = message.get("location")
+    if not telegram_user_id and location:
+        telegram_user_id = _telegram_user_id_for_location_message(message)
     if not telegram_user_id:
         return
-    location = message.get("location")
     if location:
         _save_location(telegram_user_id, location, message)
         return
@@ -1524,11 +1552,25 @@ def _handle_driver_start(chat_id: str, telegram_user_id: int, parts: list[str]) 
             connected_driver.status = DriverStatus.AVAILABLE if should_be_available else DriverStatus.OFFLINE
             connected_driver.save(update_fields=["status", "updated_at"])
 
+            if connected_driver.verification_status == DriverVerificationStatus.PENDING:
+                send_chat_message(
+                    chat_id,
+                    "<b>⏳ Hujjatlar tekshiruvda</b>\nAdmin tasdiqlagandan keyin sizga xabar beriladi va "
+                    "buyurtmalarni <b>Qabul</b> qila olasiz.",
+                    parse_mode="HTML",
+                )
+                return
             if connected_driver.verification_status == DriverVerificationStatus.REJECTED:
                 send_chat_message(
                     chat_id,
                     "<b>⛔ Hujjatlar rad etildi</b>\nAdmin tekshirgan sabab: "
-                    f"{html.escape(connected_driver.verification_reason or '-')}.",
+                    f"{html.escape(connected_driver.verification_reason or '-')}.\n\n"
+                    "Qayta topshirish uchun tugmani bosing.",
+                    reply_markup={
+                        "inline_keyboard": [
+                            [{"text": "🔄 Hujjatlarni qayta yuborish", "callback_data": "onb:reverify"}]
+                        ]
+                    },
                     parse_mode="HTML",
                 )
                 return
@@ -1536,7 +1578,15 @@ def _handle_driver_start(chat_id: str, telegram_user_id: int, parts: list[str]) 
                 _start_driver_onboarding(chat_id, connected_driver)
                 return
 
-            # Approved + docs ok: aktiv reysga qaytamiz.
+            if connected_driver.verification_status != DriverVerificationStatus.APPROVED:
+                send_chat_message(
+                    chat_id,
+                    "Holatingizni tekshirib bo‘lmadi. Administratorga murojaat qiling.",
+                    parse_mode="HTML",
+                )
+                return
+
+            # APPROVED + docs ok: aktiv reysga qaytamiz.
             active_link = _resolve_driver_order(connected_driver, None)
             if active_link:
                 send_chat_message(
@@ -1645,16 +1695,16 @@ def _start_driver_onboarding(chat_id: str, driver: Driver) -> None:
     )
     state.driver = driver
     state.is_active = True
-    state.step = "full_name"
+    state.step = "onb_license_photo"
     state.payload = {}
     state.save(update_fields=["driver", "is_active", "step", "payload", "updated_at"])
     send_chat_message(
         chat_id,
         _onb_first_block(
             1,
-            "👤",
-            "Ism va familiya",
-            "Passportdagi kabi <b>to'liq</b> ism-familiyangizni yozing.",
+            "🪪",
+            "Haydovchilik guvohnomasi",
+            _ONB_PHOTO_HINT,
         ),
         parse_mode="HTML",
     )
@@ -1670,7 +1720,6 @@ def _handle_driver_onboarding_message(message: dict) -> bool:
         return False
     chat_id = str(message.get("chat", {}).get("id", ""))
     text = str(message.get("text", "")).strip()
-    truck_only = _onb_truck_mode(state.payload)
 
     if state.step in {"await_loaded_quantity", "await_delivered_quantity"}:
         driver = state.driver or Driver.objects.filter(telegram_user_id=telegram_user_id).first()
@@ -1913,306 +1962,90 @@ def _handle_driver_onboarding_message(message: dict) -> bool:
         )
         return True
 
-    if state.step == "license_dates":
-        issued, expires = _parse_two_dates(text)
-        if not issued or not expires:
-            send_chat_message(
-                chat_id,
-                "Iltimos, ikkala sanani vergul bilan yuboring:\n"
-                "<code>2020-01-10,2030-01-10</code>\n"
-                "yoki <code>10.01.2020,10.01.2030</code>",
-                parse_mode="HTML",
-            )
+    if state.step == "onb_license_photo":
+        file_id = _message_best_photo_file_id(message)
+        if not file_id:
+            send_chat_message(chat_id, "Iltimos, haydovchilik guvohnomasi <b>rasm</b>ini yuboring.", parse_mode="HTML")
             return True
-        state.payload["license_issued_at"] = issued.isoformat()
-        state.payload["license_expires_at"] = expires.isoformat()
-        state.step = "license_photo"
+        state.payload["license_photo_file_id"] = file_id
+        state.step = "onb_texpasport_photo"
         state.save(update_fields=["payload", "step", "updated_at"])
         send_chat_message(
             chat_id,
-            _onb_first_block(5, "🪪", "Guvohnoma rasmi", _ONB_PHOTO_HINT),
+            _onb_first_block(2, "📄", "Texnika pasporti (texpasport)", _ONB_PHOTO_HINT),
             parse_mode="HTML",
         )
         return True
 
-    if state.step == "full_name":
-        if not text:
-            send_chat_message(chat_id, "Ism-familiyani matn ko'rinishida yuboring.")
+    if state.step == "onb_texpasport_photo":
+        file_id = _message_best_photo_file_id(message)
+        if not file_id:
+            send_chat_message(chat_id, "Iltimos, texpasport <b>rasm</b>ini yuboring.", parse_mode="HTML")
             return True
-        state.payload["full_name"] = text
-        state.step = "license_number"
+        state.payload["texpasport_photo_file_id"] = file_id
+        state.step = "onb_vehicle_front"
+        state.save(update_fields=["payload", "step", "updated_at"])
+        send_chat_message(
+            chat_id,
+            _onb_first_block(3, "🚗", "Mashina (old tomondan)", _ONB_PHOTO_HINT),
+            parse_mode="HTML",
+        )
+        return True
+
+    if state.step == "onb_vehicle_front":
+        file_id = _message_best_photo_file_id(message)
+        if not file_id:
+            send_chat_message(chat_id, "Iltimos, mashina oldi <b>rasm</b>ini yuboring.", parse_mode="HTML")
+            return True
+        state.payload["vehicle_front_photo_file_id"] = file_id
+        state.step = "onb_vehicle_rear"
+        state.save(update_fields=["payload", "step", "updated_at"])
+        send_chat_message(
+            chat_id,
+            _onb_first_block(4, "🚗", "Mashina (orqa tomondan)", _ONB_PHOTO_HINT),
+            parse_mode="HTML",
+        )
+        return True
+
+    if state.step == "onb_vehicle_rear":
+        file_id = _message_best_photo_file_id(message)
+        if not file_id:
+            send_chat_message(chat_id, "Iltimos, mashina orqasi <b>rasm</b>ini yuboring.", parse_mode="HTML")
+            return True
+        state.payload["vehicle_rear_photo_file_id"] = file_id
+        state.step = "onb_capacity_kg"
         state.save(update_fields=["payload", "step", "updated_at"])
         send_chat_message(
             chat_id,
             _onb_first_block(
-                2,
-                "🔢",
-                "Haydovchilik guvohnomasi raqami",
-                "Raqamni <b>qanday bo'lsa, shunday</b> yozing (probelsiz).",
+                5,
+                "⚖️",
+                "Mashina umumiy sig‘imi",
+                "Mashina qancha mahsulotni sig‘dirishini <b>kg</b>da yozing.\nMasalan: <code>12000</code> yoki <code>12000 kg</code>.",
             ),
             parse_mode="HTML",
         )
         return True
-    if state.step == "license_number":
-        if not text:
-            send_chat_message(chat_id, "Guvohnoma raqamini matn sifatida yuboring.")
+
+    if state.step == "onb_capacity_kg":
+        kg, err = _parse_capacity_kg(text)
+        if err or kg is None:
+            send_chat_message(chat_id, err or "Noto‘g‘ri qiymat.", parse_mode="HTML")
             return True
-        state.payload["license_number"] = text
-        state.step = "license_issued"
-        state.save(update_fields=["payload", "step", "updated_at"])
-        send_chat_message(
-            chat_id,
-            _onb_first_block(3, "📅", "Guvohnoma berilgan sana", _ONB_DATE_HINT),
-            parse_mode="HTML",
-        )
+        state.payload["capacity_kg"] = str(kg)
+        user = message.get("from") or {}
+        username = (user.get("username") or "").strip()
+        with transaction.atomic():
+            _apply_onboarding_data(state)
+            _persist_driver_pending_verification(
+                driver=state.driver,
+                telegram_user_id=telegram_user_id,
+                username=username,
+                state=state,
+            )
+        send_chat_message(chat_id, _DRIVER_REGISTRATION_SAVED_HTML, parse_mode="HTML")
         return True
-    if state.step == "license_issued":
-        if not text:
-            send_chat_message(chat_id, "Sanani yozing yoki ikki sanani vergul bilan yuboring.")
-            return True
-        duo = _parse_two_dates(text)
-        if duo[0] and duo[1]:
-            state.payload["license_issued_at"] = duo[0].isoformat()
-            state.payload["license_expires_at"] = duo[1].isoformat()
-            state.step = "license_photo"
-            state.save(update_fields=["payload", "step", "updated_at"])
-            send_chat_message(
-                chat_id,
-                _onb_first_block(5, "🪪", "Guvohnoma rasmi", _ONB_PHOTO_HINT),
-                parse_mode="HTML",
-            )
-            return True
-        issued = _parse_date_flexible(text)
-        if not issued:
-            send_chat_message(
-                chat_id,
-                "Sana tushunarsiz. Masalan: <code>2020-05-01</code> yoki <code>01.05.2020</code>",
-                parse_mode="HTML",
-            )
-            return True
-        state.payload["license_issued_at"] = issued.isoformat()
-        state.step = "license_expires"
-        state.save(update_fields=["payload", "step", "updated_at"])
-        send_chat_message(
-            chat_id,
-            _onb_first_block(4, "📅", "Guvohnoma tugash sanasi", _ONB_DATE_HINT),
-            parse_mode="HTML",
-        )
-        return True
-    if state.step == "license_expires":
-        if not text:
-            send_chat_message(chat_id, "Tugash sanasini yozing.")
-            return True
-        expires = _parse_date_flexible(text)
-        if not expires:
-            send_chat_message(
-                chat_id,
-                "Sana tushunarsiz. Masalan: <code>2030-05-01</code>",
-                parse_mode="HTML",
-            )
-            return True
-        issued_raw = state.payload.get("license_issued_at")
-        issued_prev = _parse_date(str(issued_raw)) if issued_raw else None
-        if issued_prev and expires <= issued_prev:
-            send_chat_message(chat_id, "Tugash sanasi berilgan sanadan keyin bo'lishi kerak.")
-            return True
-        state.payload["license_expires_at"] = expires.isoformat()
-        state.step = "license_photo"
-        state.save(update_fields=["payload", "step", "updated_at"])
-        send_chat_message(
-            chat_id,
-            _onb_first_block(5, "🪪", "Guvohnoma rasmi", _ONB_PHOTO_HINT),
-            parse_mode="HTML",
-        )
-        return True
-    if state.step == "license_photo":
-        file_id = _message_best_photo_file_id(message)
-        if not file_id:
-            send_chat_message(chat_id, "Iltimos, guvohnoma <b>rasm</b>ini yuboring.", parse_mode="HTML")
-            return True
-        state.payload["license_photo_file_id"] = file_id
-        state.step = "vehicle_plate"
-        state.save(update_fields=["payload", "step", "updated_at"])
-        if truck_only:
-            send_chat_message(
-                chat_id,
-                _onb_truck_block(
-                    1,
-                    "🔖",
-                    "Davlat raqami",
-                    "Masalan: <code>80A123BC</code> (probellarsiz, katta harf).",
-                ),
-                parse_mode="HTML",
-            )
-        else:
-            send_chat_message(
-                chat_id,
-                _onb_first_block(
-                    6,
-                    "🔖",
-                    "Texnika davlat raqami",
-                    "Masalan: <code>80A123BC</code> (probellarsiz, katta harf).",
-                ),
-                parse_mode="HTML",
-            )
-        return True
-    if state.step == "vehicle_plate":
-        if not text:
-            send_chat_message(chat_id, "Davlat raqamini yuboring.")
-            return True
-        state.payload["vehicle_plate"] = text.upper().strip()
-        state.step = "vehicle_capacity_ton"
-        state.save(update_fields=["payload", "step", "updated_at"])
-        if truck_only:
-            send_chat_message(
-                chat_id,
-                _onb_truck_block(2, "⚖️", "Texnika sig'imi (tonna)", "Masalan: <code>10</code> (probellarsiz)."),
-                parse_mode="HTML",
-            )
-        else:
-            send_chat_message(
-                chat_id,
-                _onb_first_block(7, "⚖️", "Texnika sig'imi (tonna)", "Masalan: <code>10</code> (probellarsiz)."),
-                parse_mode="HTML",
-            )
-        return True
-    if state.step == "vehicle_capacity_ton":
-        if not text:
-            send_chat_message(
-                chat_id,
-                "Texnika sig'imi (tonna)ni yuboring. Masalan: <code>10</code> yoki <code>8.50</code>",
-                parse_mode="HTML",
-            )
-            return True
-        raw = str(text).strip().replace(",", ".")
-        try:
-            cap = Decimal(raw)
-        except Exception:
-            send_chat_message(
-                chat_id,
-                "Sig'im raqami tushunarsiz. Masalan: <code>10</code> yoki <code>8.50</code>",
-                parse_mode="HTML",
-            )
-            return True
-        if cap <= 0:
-            send_chat_message(
-                chat_id,
-                "Sig'im musbat bo'lishi kerak. Masalan: <code>10</code>",
-                parse_mode="HTML",
-            )
-            return True
-        cap = cap.quantize(Decimal("0.01"))
-        state.payload["vehicle_capacity_ton"] = str(cap)
-        state.step = "vehicle_doc_number"
-        state.save(update_fields=["payload", "step", "updated_at"])
-        if truck_only:
-            send_chat_message(
-                chat_id,
-                _onb_truck_block(3, "📄", "Ro'yxatga olish hujjati raqami", "Texnika pasportidagi raqamni yozing."),
-                parse_mode="HTML",
-            )
-        else:
-            send_chat_message(
-                chat_id,
-                _onb_first_block(8, "📄", "Ro'yxatga olish hujjati raqami", "Texnika pasportidagi raqamni yozing."),
-                parse_mode="HTML",
-            )
-        return True
-    if state.step == "vehicle_doc_number":
-        if not text:
-            send_chat_message(chat_id, "Hujjat raqamini yuboring.")
-            return True
-        state.payload["vehicle_doc_number"] = text
-        state.step = "vehicle_registration_photo"
-        state.save(update_fields=["payload", "step", "updated_at"])
-        if truck_only:
-            send_chat_message(
-                chat_id,
-                _onb_truck_block(4, "🖼", "Registratsiya rasmi", _ONB_PHOTO_HINT),
-                parse_mode="HTML",
-            )
-        else:
-            send_chat_message(
-                chat_id,
-                _onb_first_block(9, "🖼", "Registratsiya rasmi", _ONB_PHOTO_HINT),
-                parse_mode="HTML",
-            )
-        return True
-    if state.step == "vehicle_registration_photo":
-        file_id = _message_best_photo_file_id(message)
-        if not file_id:
-            send_chat_message(chat_id, "Iltimos, registratsiya <b>rasm</b>ini yuboring.", parse_mode="HTML")
-            return True
-        state.payload["vehicle_registration_photo_file_id"] = file_id
-        state.step = "calibration_expiry"
-        state.save(update_fields=["payload", "step", "updated_at"])
-        if truck_only:
-            send_chat_message(
-                chat_id,
-                _onb_truck_block(5, "⏱", "Sisterna kalibrovka muddati", _ONB_DATE_HINT),
-                parse_mode="HTML",
-            )
-        else:
-            send_chat_message(
-                chat_id,
-                _onb_first_block(10, "⏱", "Sisterna kalibrovka muddati", _ONB_DATE_HINT),
-                parse_mode="HTML",
-            )
-        return True
-    if state.step == "calibration_expiry":
-        exp = _parse_date_flexible(text)
-        if not exp:
-            send_chat_message(
-                chat_id,
-                "Sana tushunarsiz. Masalan: <code>2026-12-31</code>",
-                parse_mode="HTML",
-            )
-            return True
-        state.payload["calibration_expires_at"] = exp.isoformat()
-        state.step = "tanker_document_photo"
-        state.save(update_fields=["payload", "step", "updated_at"])
-        if truck_only:
-            send_chat_message(
-                chat_id,
-                _onb_truck_block(6, "🛢", "Sisterna hujjati rasmi", _ONB_PHOTO_HINT),
-                parse_mode="HTML",
-            )
-        else:
-            send_chat_message(
-                chat_id,
-                _onb_first_block(11, "🛢", "Sisterna hujjati rasmi", _ONB_PHOTO_HINT),
-                parse_mode="HTML",
-            )
-        return True
-    if state.step == "tanker_document_photo":
-        file_id = _message_best_photo_file_id(message)
-        if not file_id:
-            send_chat_message(chat_id, "Iltimos, sisterna hujjati <b>rasm</b>ini yuboring.", parse_mode="HTML")
-            return True
-        state.payload["tanker_document_photo_file_id"] = file_id
-        _apply_onboarding_data(state)
-        state.payload["onb_truck_only"] = False
-        state.step = "add_another_truck"
-        state.save(update_fields=["payload", "step", "updated_at"])
-        send_chat_message(
-            chat_id,
-            "<b>✅ Texnika saqlandi</b>\n\nYana avtomobil qo'shasizmi?",
-            reply_markup={
-                "inline_keyboard": [
-                    [{"text": "➕ Ha, yana texnika", "callback_data": "onb:add_truck"}],
-                    [{"text": "✔️ Yo'q, tugatish", "callback_data": "onb:finish"}],
-                ]
-            },
-            parse_mode="HTML",
-        )
-        return True
-    if state.step == "add_another_truck":
-        send_chat_message(
-            chat_id,
-            "Pastdagi tugmalardan birini tanlang: <b>yana texnika</b> yoki <b>tugatish</b>.",
-            parse_mode="HTML",
-        )
-        return True
+
     return True
 
 
@@ -2233,7 +2066,7 @@ def _handle_onboarding_callback(callback_query: dict, callback_data: str) -> Non
         )
         state.driver = driver
         state.is_active = True
-        state.step = "license_number"
+        state.step = "onb_license_photo"
         state.payload = {}
         state.save(update_fields=["driver", "is_active", "step", "payload", "updated_at"])
         if driver.status != DriverStatus.OFFLINE:
@@ -2241,12 +2074,7 @@ def _handle_onboarding_callback(callback_query: dict, callback_data: str) -> Non
             driver.save(update_fields=["status", "updated_at"])
         send_chat_message(
             chat_id,
-            _onb_first_block(
-                2,
-                "🔢",
-                "Haydovchilik guvohnomasi raqami",
-                "Raqamni <b>qanday bo'lsa, shunday</b> yozing (probelsiz).",
-            ),
+            _onb_first_block(1, "🪪", "Haydovchilik guvohnomasi", _ONB_PHOTO_HINT),
             parse_mode="HTML",
         )
         _safe_answer(callback_id, "Qayta topshirish boshlandi")
@@ -2257,78 +2085,114 @@ def _handle_onboarding_callback(callback_query: dict, callback_data: str) -> Non
         _safe_answer(callback_id, "Onboarding topilmadi")
         return
     if callback_data == "onb:add_truck":
-        state.payload["onb_truck_only"] = True
-        state.payload.pop("vehicle_plate", None)
-        state.payload.pop("vehicle_capacity_ton", None)
-        state.payload.pop("vehicle_doc_number", None)
-        state.payload.pop("vehicle_registration_photo_file_id", None)
-        state.payload.pop("calibration_expires_at", None)
-        state.payload.pop("tanker_document_photo_file_id", None)
-        state.step = "vehicle_plate"
-        state.save(update_fields=["step", "payload", "updated_at"])
-        send_chat_message(
-            chat_id,
-            _onb_truck_block(
-                1,
-                "🔖",
-                "Davlat raqami",
-                "Masalan: <code>80A123BC</code> (probellarsiz).",
-            ),
-            parse_mode="HTML",
-        )
-        _safe_answer(callback_id, "Keyingi qadam")
-        return
-    if callback_data == "onb:finish":
-        # Hujjatlar to'liq yig'ildi — admin tekshirigidan o'tmaguncha yuk qabul qilinmaydi.
-        driver = state.driver
-        if driver:
-            from drivers.models import DriverVerificationAudit, DriverVerificationAuditAction
-
-            # Driver ro'yxatdan o'tishi yakunlandi — admin tekshirishi uchun "Submitted" audit.
-            DriverVerificationAudit.objects.create(
-                driver=driver,
-                action=DriverVerificationAuditAction.SUBMITTED,
-                actor_username="driver",
-                actor_id=telegram_user_id,
-                reason="",
-                from_status=driver.verification_status,
-                to_status=DriverVerificationStatus.PENDING,
-                details={
-                    "license_expires_at": driver.license_expires_at.isoformat() if driver.license_expires_at else None,
-                    "vehicles_count": driver.vehicles.count(),
-                },
-            )
-            driver.verification_status = DriverVerificationStatus.PENDING
-            driver.verification_reason = ""
-            driver.registration_submitted_at = django_timezone.now()
-            driver.verification_updated_at = django_timezone.now()
-            driver.verification_updated_by_username = username
-            # Admin tasdiqlamaguncha haydovchi offline turadi.
-            driver.status = DriverStatus.OFFLINE
-            driver.save(
-                update_fields=[
-                    "verification_status",
-                    "verification_reason",
-                    "registration_submitted_at",
-                    "verification_updated_at",
-                    "verification_updated_by_username",
-                    "status",
-                ]
-            )
-            cache.delete("ops_dashboard_v1")
         state.is_active = False
-        state.step = "done"
+        state.step = "idle"
         state.save(update_fields=["is_active", "step", "updated_at"])
         send_chat_message(
             chat_id,
-            "<b>✅ Hujjatlaringiz saqlandi</b>\n\n"
-            "Admin ularni ko'rib chiqadi. "
-            "Tasdiqlangandan keyin sizga xabar beriladi va keyin guruhdagi buyurtmalarni <b>Qabul</b> qilishingiz mumkin.",
+            "Qo'shimcha mashina uchun <code>/add_vehicle</code> buyrug'idan foydalaning.",
             parse_mode="HTML",
+        )
+        _safe_answer(callback_id, "OK")
+        return
+    if callback_data == "onb:finish":
+        driver = state.driver
+        _finalize_driver_registration_submission(
+            driver=driver,
+            telegram_user_id=telegram_user_id,
+            username=username,
+            chat_id=chat_id,
+            state=state,
         )
         _safe_answer(callback_id, "Tugatildi")
         return
     _safe_answer(callback_id, "Noma'lum amal")
+
+
+def _synthetic_vehicle_plate(driver: Driver) -> str:
+    uid = int(driver.telegram_user_id or 0)
+    base = f"TG{uid}"
+    if len(base) > 20:
+        base = "TG" + str(uid)[-17:]
+    if not Vehicle.objects.filter(plate_number=base).exclude(driver_id=driver.pk).exists():
+        return base
+    return f"TG{uid}-{driver.pk}"[:20]
+
+
+_DRIVER_REGISTRATION_SAVED_HTML = (
+    "<b>✅ Hujjatlaringiz saqlandi</b>\n\n"
+    "Admin ularni ko'rib chiqadi. "
+    "Tasdiqlangandan keyin sizga xabar beriladi va keyin guruhdagi buyurtmalarni <b>Qabul</b> qilishingiz mumkin.\n\n"
+    "<i>Qo‘shimcha mashina kerak bo‘lsa (ikkinchi va keyingi avto):</i> <code>/add_vehicle</code> "
+    "— davlat raqami va sig‘im (tonna) so‘raladi."
+)
+
+
+def _persist_driver_pending_verification(
+    *,
+    driver: Driver | None,
+    telegram_user_id: int,
+    username: str,
+    state: DriverOnboardingState,
+) -> None:
+    if not driver:
+        return
+    from drivers.models import DriverVerificationAudit, DriverVerificationAuditAction
+
+    DriverVerificationAudit.objects.create(
+        driver=driver,
+        action=DriverVerificationAuditAction.SUBMITTED,
+        actor_username="driver",
+        actor_id=telegram_user_id,
+        reason="",
+        from_status=driver.verification_status,
+        to_status=DriverVerificationStatus.PENDING,
+        details={
+            "license_expires_at": driver.license_expires_at.isoformat() if driver.license_expires_at else None,
+            "vehicles_count": driver.vehicles.count(),
+        },
+    )
+    driver.verification_status = DriverVerificationStatus.PENDING
+    driver.verification_reason = ""
+    driver.registration_submitted_at = django_timezone.now()
+    driver.verification_updated_at = django_timezone.now()
+    driver.verification_updated_by_username = username
+    driver.status = DriverStatus.OFFLINE
+    driver.save(
+        update_fields=[
+            "verification_status",
+            "verification_reason",
+            "registration_submitted_at",
+            "verification_updated_at",
+            "verification_updated_by_username",
+            "status",
+        ]
+    )
+    cache.delete("ops_dashboard_v1")
+    state.is_active = False
+    state.step = "done"
+    state.save(update_fields=["is_active", "step", "updated_at"])
+
+
+def _finalize_driver_registration_submission(
+    *,
+    driver: Driver | None,
+    telegram_user_id: int,
+    username: str,
+    chat_id: str,
+    state: DriverOnboardingState,
+) -> None:
+    _persist_driver_pending_verification(
+        driver=driver,
+        telegram_user_id=telegram_user_id,
+        username=username,
+        state=state,
+    )
+    send_chat_message(
+        chat_id,
+        _DRIVER_REGISTRATION_SAVED_HTML,
+        parse_mode="HTML",
+    )
 
 
 def _apply_onboarding_data(state: DriverOnboardingState) -> None:
@@ -2336,85 +2200,45 @@ def _apply_onboarding_data(state: DriverOnboardingState) -> None:
     if not driver:
         return
     payload = state.payload or {}
-    full_name = str(payload.get("full_name", "")).strip()
-    if full_name:
-        driver.full_name = full_name
-    driver.license_number = str(payload.get("license_number", "")).strip()
-    driver.license_issued_at = _parse_date(str(payload.get("license_issued_at", "")))
-    driver.license_expires_at = _parse_date(str(payload.get("license_expires_at", "")))
+    kg_raw = str(payload.get("capacity_kg", "")).strip().replace(",", ".")
+    try:
+        kg = Decimal(kg_raw)
+    except Exception:
+        kg = Decimal("0")
+    capacity_ton = (kg / Decimal("1000")).quantize(Decimal("0.01"))
+    if capacity_ton <= 0:
+        capacity_ton = Decimal("0.01")
+
     driver.license_photo_file_id = str(payload.get("license_photo_file_id", "")).strip()
-    driver.registration_photo_file_id = str(payload.get("vehicle_registration_photo_file_id", "")).strip()
+    driver.registration_photo_file_id = ""
+    driver.license_number = ""
+    driver.license_issued_at = None
+    driver.license_expires_at = None
     driver.save(
         update_fields=[
-            "full_name",
+            "license_photo_file_id",
+            "registration_photo_file_id",
             "license_number",
             "license_issued_at",
             "license_expires_at",
-            "license_photo_file_id",
-            "registration_photo_file_id",
-            "updated_at",
-        ]
-    )
-    plate_value = str(payload.get("vehicle_plate", "")).strip().upper() or f"TEMP-{driver.pk}-{driver.vehicles.count() + 1}"
-    existing_plate = driver.vehicles.filter(plate_number=plate_value).first()
-    if not existing_plate and Driver.objects.filter(vehicles__plate_number=plate_value).exclude(pk=driver.pk).exists():
-        plate_value = f"{plate_value}-{driver.pk}"
-    vehicle = driver.vehicles.filter(plate_number=plate_value).first()
-    cap_raw = str(payload.get("vehicle_capacity_ton", "")).strip().replace(",", ".")
-    try:
-        capacity_ton = Decimal(cap_raw) if cap_raw else Decimal("0")
-    except Exception:
-        capacity_ton = Decimal("0")
-    if capacity_ton < 0:
-        capacity_ton = Decimal("0")
-    if not vehicle:
-        vehicle = driver.vehicles.create(
-            plate_number=plate_value,
-            vehicle_type="Tanker",
-            capacity_ton=capacity_ton,
-        )
-    else:
-        vehicle.capacity_ton = capacity_ton
-    vehicle.registration_document_number = str(payload.get("vehicle_doc_number", "")).strip()
-    vehicle.registration_photo_file_id = str(payload.get("vehicle_registration_photo_file_id", "")).strip()
-    vehicle.calibration_expires_at = _parse_date(str(payload.get("calibration_expires_at", "")))
-    vehicle.tanker_document_photo_file_id = str(payload.get("tanker_document_photo_file_id", "")).strip()
-    vehicle.save(
-        update_fields=[
-            "capacity_ton",
-            "registration_document_number",
-            "registration_photo_file_id",
-            "calibration_expires_at",
-            "tanker_document_photo_file_id",
             "updated_at",
         ]
     )
 
-
-def _parse_date_flexible(value: str) -> date | None:
-    v = (value or "").strip()
-    if not v:
-        return None
-    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(v, fmt).date()
-        except ValueError:
-            continue
-    return None
-
-
-def _parse_date(value: str) -> date | None:
-    try:
-        return datetime.strptime(value.strip(), "%Y-%m-%d").date()
-    except (TypeError, ValueError):
-        return None
-
-
-def _parse_two_dates(value: str) -> tuple[date | None, date | None]:
-    if "," not in value:
-        return None, None
-    left, right = value.split(",", 1)
-    return _parse_date_flexible(left), _parse_date_flexible(right)
+    driver.vehicles.all().delete()
+    plate_value = _synthetic_vehicle_plate(driver)
+    Vehicle.objects.create(
+        driver=driver,
+        plate_number=plate_value,
+        vehicle_type="Tanker",
+        capacity_ton=capacity_ton,
+        registration_document_number="",
+        registration_photo_file_id=str(payload.get("texpasport_photo_file_id", "")).strip(),
+        front_photo_file_id=str(payload.get("vehicle_front_photo_file_id", "")).strip(),
+        rear_photo_file_id=str(payload.get("vehicle_rear_photo_file_id", "")).strip(),
+        calibration_expires_at=None,
+        tanker_document_photo_file_id="",
+    )
 
 
 def _pick_photo_file_id(photo_items: list[dict]) -> str:

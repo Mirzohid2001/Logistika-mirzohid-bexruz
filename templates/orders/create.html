@@ -1,19 +1,34 @@
 {% extends "base.html" %}
 {% block title %}Yangi buyurtma | Shofir{% endblock %}
+{% block breadcrumbs %}
+<nav class="breadcrumb-nav" aria-label="Yo‘l xaritasi">
+  <a href="{% url 'home' %}">Bosh sahifa</a>
+  <span class="breadcrumb-nav__sep" aria-hidden="true">/</span>
+  <a href="{% url 'order-list' %}">Buyurtmalar</a>
+  <span class="breadcrumb-nav__sep" aria-hidden="true">/</span>
+  <span class="breadcrumb-nav__here">Yangi buyurtma</span>
+</nav>
+{% endblock %}
 {% block content %}
 <div class="order-create-page">
   <header class="order-create-head">
     <div class="order-create-head-text">
       <h1 class="order-create-title">Yangi buyurtma</h1>
-      <p class="order-create-lead muted">Asosiy maydonlarni to‘ldiring; manzillarni xarita yoki matn bilan kiritishingiz mumkin. Saqlangach buyurtma Telegram guruhga yuboriladi.</p>
+      <p class="order-create-lead muted">
+        <strong>*</strong> belgisi majburiy maydonlar. Kontakt va izohni keyin ham to‘ldirish mumkin.
+        Vaqt va (agar .env da berilgan bo‘lsa) yo‘nalishlar avtomatik to‘ldiriladi.
+      </p>
     </div>
     <div class="order-create-head-actions">
       <a class="btn btn-secondary" href="{% url 'order-list' %}">← Buyurtmalar</a>
     </div>
   </header>
 
-  <form method="post" class="order-create-form">
+  <form method="post" class="order-create-form" novalidate>
     {% csrf_token %}
+    {% if form.non_field_errors %}
+      <div class="alert alert-danger app-alert" role="alert">{{ form.non_field_errors }}</div>
+    {% endif %}
     <div class="order-create-layout">
       <div class="order-create-primary">
 

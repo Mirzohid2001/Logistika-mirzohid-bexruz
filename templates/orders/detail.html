@@ -1,5 +1,14 @@
 {% extends "base.html" %}
 {% block title %}Buyurtma #{{ order.pk }} | Shofir{% endblock %}
+{% block breadcrumbs %}
+<nav class="breadcrumb-nav" aria-label="Yo‘l xaritasi">
+  <a href="{% url 'home' %}">Bosh sahifa</a>
+  <span class="breadcrumb-nav__sep" aria-hidden="true">/</span>
+  <a href="{% url 'order-list' %}">Buyurtmalar</a>
+  <span class="breadcrumb-nav__sep" aria-hidden="true">/</span>
+  <span class="breadcrumb-nav__here">#{{ order.pk }}</span>
+</nav>
+{% endblock %}
 {% block content %}
 <div class="card">
   <h1 class="title">Buyurtma #{{ order.pk }}</h1>
@@ -179,6 +188,10 @@
 </div>
 {% endif %}
 
+{% if order.status == 'in_transit' %}
+  {% include "orders/includes/custody_and_finish.html" with emphasis=True %}
+{% endif %}
+
 <div class="card">
   <h2 class="title">Qo‘shimcha xarajatlar (buxgalteriya)</h2>
   <form method="post" action="{% url 'order-expense-add' order.pk %}" class="row g-3 align-items-end">
@@ -233,44 +246,9 @@
   {% endif %}
 </div>
 
-<div class="card">
-  <h2 class="title">Hajm nazorati (zavod → klient)</h2>
-  <p class="muted">Tarozi yoki o‘lchovchi bo‘yicha fakt. Litr ishlatsangiz, har bir qatorda tegishli zichlik (kg/L) kiriting; topshirish zichligini bo‘sh qoldirsangiz, yuklangan zichligi ishlatiladi.</p>
-  <form method="post" action="{% url 'order-custody-update' order.pk %}">
-    {% csrf_token %}
-    <div class="row g-3">
-      <div class="col-md-4">
-        <label class="form-label" for="id_loaded_quantity">{{ custody_form.loaded_quantity.label }}</label>
-        {{ custody_form.loaded_quantity }}
-        {% if custody_form.loaded_quantity.errors %}<div class="text-danger small">{{ custody_form.loaded_quantity.errors }}</div>{% endif %}
-      </div>
-      <div class="col-md-4">
-        <label class="form-label" for="id_loaded_quantity_uom">{{ custody_form.loaded_quantity_uom.label }}</label>
-        {{ custody_form.loaded_quantity_uom }}
-      </div>
-      <div class="col-md-4">
-        <label class="form-label" for="id_density_kg_per_liter">{{ custody_form.density_kg_per_liter.label }}</label>
-        {{ custody_form.density_kg_per_liter }}
-      </div>
-      <div class="col-md-4">
-        <label class="form-label" for="id_delivered_quantity">{{ custody_form.delivered_quantity.label }}</label>
-        {{ custody_form.delivered_quantity }}
-        {% if custody_form.delivered_quantity.errors %}<div class="text-danger small">{{ custody_form.delivered_quantity.errors }}</div>{% endif %}
-      </div>
-      <div class="col-md-4">
-        <label class="form-label" for="id_delivered_quantity_uom">{{ custody_form.delivered_quantity_uom.label }}</label>
-        {{ custody_form.delivered_quantity_uom }}
-      </div>
-      <div class="col-md-4">
-        <label class="form-label" for="id_delivered_density_kg_per_liter">{{ custody_form.delivered_density_kg_per_liter.label }}</label>
-        {{ custody_form.delivered_density_kg_per_liter }}
-      </div>
-      <div class="col-12 d-flex justify-content-end">
-        <button class="btn btn-primary" type="submit">Hajmni saqlash</button>
-      </div>
-    </div>
-  </form>
-</div>
+{% if order.status != 'in_transit' %}
+  {% include "orders/includes/custody_and_finish.html" with emphasis=False %}
+{% endif %}
 
 <div class="card">
   <h2 class="title">Muhr / qadoqlik (tanker bo‘limlari)</h2>
@@ -456,6 +434,39 @@
 {% endif %}
 
 <div class="card">
+  <h2 class="title">Tarix / audit</h2>
+  <p class="muted">Holat o‘zgarishlari (avtomatik) va muhim maydonlar (hajm, tender narxi).</p>
+  {% if state_logs %}
+    <h3 class="title" style="font-size:1rem">Holat</h3>
+    <ul class="audit-list">
+      {% for log in state_logs %}
+        <li>
+          <span class="muted">{{ log.created_at|date:"d.m.Y H:i" }}</span> —
+          {{ log.get_from_status_display|default:"—" }} → <strong>{{ log.get_to_status_display }}</strong>
+          · {{ log.changed_by|default:"—" }}
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+  {% if field_audits %}
+    <h3 class="title" style="font-size:1rem;margin-top:12px">Maydonlar</h3>
+    <ul class="audit-list">
+      {% for a in field_audits %}
+        <li>
+          <span class="muted">{{ a.created_at|date:"d.m.Y H:i" }}</span> —
+          <code>{{ a.field_name }}</code>:
+          {{ a.old_value|truncatechars:80 }} → {{ a.new_value|truncatechars:80 }}
+          · {{ a.changed_by|default:"—" }}
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+  {% if not state_logs and not field_audits %}
+    <p class="muted">Hozircha yozuv yo‘q.</p>
+  {% endif %}
+</div>
+
+<div class="card">
   <h2 class="title">Tender va narxlash</h2>
   <div class="actions">
     <form method="post" action="{% url 'order-tender-open' order.pk %}" class="split-form">
@@ -507,19 +518,9 @@
     Yuk olish / tushirish, reja marshruti va haydovchi <b>jonli izi</b> (Telegram Live). Yangilanish ~3 s.
   </p>
   {% if finish_request_exists and order.status == "in_transit" %}
-    <div class="actions" style="margin-top:12px">
-      <form method="post" action="{% url 'order-finish-confirm' order.pk %}">
-        {% csrf_token %}
-        <div style="display:flex;flex-direction:column;gap:8px;min-width:min(620px,90vw)">
-          <label class="form-label" for="shortage_note_{{ order.pk }}">Kamomad bo‘lsa izoh (70kg+ majburiy)</label>
-          <textarea id="shortage_note_{{ order.pk }}" name="shortage_note" rows="2" placeholder="Masalan: obyekt tarozisidagi akt bo‘yicha 82kg farq, qayta o‘lchash kutilmoqda"></textarea>
-        </div>
-        <button class="btn btn-secondary" type="submit">Admin tasdiqladi: Tugallandi</button>
-      </form>
-    </div>
-    <p class="muted" style="margin-top:8px">
-      Haydovchi tugallash so'rovini yubordi.
-      {% if finish_request_created_at %}Vaqt: {{ finish_request_created_at|date:"d.m.Y H:i" }}{% endif %}
+    <p class="muted" style="margin-top:12px">
+      Reysni yakunlash: <a href="#hajm-nazorati">«Yo‘lda — hajm va yakunlash»</a> bo‘limiga o‘ting (hajm va tasdiq bir joyda).
+      {% if finish_request_created_at %}Haydovchi so‘rovi: {{ finish_request_created_at|date:"d.m.Y H:i" }}{% endif %}
     </p>
   {% endif %}
 </div>

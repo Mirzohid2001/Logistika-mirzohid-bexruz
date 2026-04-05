@@ -97,8 +97,8 @@ class Order(models.Model):
     pickup_time = models.DateTimeField()
     actual_start_at = models.DateTimeField(null=True, blank=True)
     sla_deadline_at = models.DateTimeField(null=True, blank=True)
-    contact_name = models.CharField(max_length=120)
-    contact_phone = models.CharField(max_length=30)
+    contact_name = models.CharField(max_length=120, blank=True, default="")
+    contact_phone = models.CharField(max_length=30, blank=True, default="")
     comment = models.TextField(blank=True)
     route_polyline = models.JSONField(default=list, blank=True)
     geofence_polygon = models.JSONField(default=list, blank=True)
@@ -271,6 +271,23 @@ class OrderStateLog(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+
+
+class OrderFieldAudit(models.Model):
+    """Muhim maydonlar (narx, hajm) o‘zgarishi: kim, qachon."""
+
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="field_audits")
+    field_name = models.CharField(max_length=64)
+    old_value = models.TextField(blank=True)
+    new_value = models.TextField(blank=True)
+    changed_by = models.CharField(max_length=120, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"#{self.order_id} {self.field_name}"
 
 
 class PaymentLedger(models.Model):

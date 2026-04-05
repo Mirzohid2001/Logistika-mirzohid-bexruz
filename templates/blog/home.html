@@ -1,13 +1,20 @@
 {% extends "base.html" %}
-{% block title %}Bosh sahifa | Shofir{% endblock %}
+{% block title %}Operator bosh sahifa | Shofir{% endblock %}
+{% block breadcrumbs %}
+<nav class="breadcrumb-nav" aria-label="Yo‘l xaritasi">
+  <span class="breadcrumb-nav__here">Operator bosh sahifa</span>
+</nav>
+{% endblock %}
 {% block content %}
 <div class="card">
-  <h1 class="title">Neft zavodi shofirlar platformasi</h1>
-  <p class="muted">Markaziy panel: aktiv yuklar, shofyor holati, KPI va tezkor boshqaruv. Moliyada klientdan tushum yo‘q — faqat haydovchi va ichki xarajatlar.</p>
+  <h1 class="title">Operator bosh sahifa</h1>
+  <p class="muted">Eng ko‘p kerak bo‘ladigan buyurtmalar, bugungi reyslar va SLA bo‘yicha kechikishlar — bir joyda. Moliyada klientdan tushum yo‘q — faqat haydovchi va ichki xarajatlar.</p>
   <div class="actions">
     <a class="btn" href="{% url 'order-create' %}">Yangi buyurtma</a>
-    <a class="btn btn-secondary" href="{% url 'order-list' %}">Buyurtmalar ro‘yxati</a>
-    <a class="btn btn-secondary" href="{% url 'ops-dashboard' %}">To‘liq operatsion panel</a>
+    <a class="btn btn-secondary" href="{% url 'order-list' %}">Barcha buyurtmalar</a>
+    <a class="btn btn-secondary" href="{% url 'order-list' %}?preset=today">Bugungi reyslar (filtr)</a>
+    <a class="btn btn-secondary" href="{% url 'order-list' %}?preset=delayed">Kechikkanlar (SLA)</a>
+    <a class="btn btn-secondary" href="{% url 'ops-dashboard' %}">Operatsion panel</a>
   </div>
 </div>
 
@@ -15,12 +22,12 @@
   <h2 class="title">Tezkor modullar</h2>
   <div class="quick-grid">
     <a class="quick-tile" href="{% url 'client-list' %}">
-      <b>Klientlar moduli</b>
-      <span>Ro‘yxat, reyting, SLA, hisobotlar, 360°</span>
+      <b>Narx / tender (klientlar)</b>
+      <span>Kontrakt, tarif, SLA, hisobotlar, 360°</span>
     </a>
     <a class="quick-tile" href="{% url 'driver-list' %}">
-      <b>Shofyorlar moduli</b>
-      <span>Ro‘yxat, analitika, haydovchi to‘lovlari, lokatsiya, 360°</span>
+      <b>Haydovchilar</b>
+      <span>Ro‘yxat, tasdiq, transport, reyting</span>
     </a>
     <a class="quick-tile" href="{% url 'ops-dashboard' %}">
       <b>Operatsion panel</b>
@@ -58,6 +65,118 @@
     {% endif %}
   </div>
 </div>
+
+{% if not safe_mode %}
+<div class="card card--emphasis">
+  <div class="card-headline">
+    <h2 class="title">SLA bo‘yicha kechikkanlar</h2>
+    <a class="btn btn-secondary btn-sm" href="{% url 'order-list' %}?preset=delayed">Barchasini ko‘rish</a>
+  </div>
+  <p class="muted">Muddat o‘tgan, lekin hali yakunlanmagan yoki bekor qilinmagan buyurtmalar.</p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>№</th>
+          <th>Yo‘nalish</th>
+          <th>Klient</th>
+          <th>Shofyor</th>
+          <th>SLA</th>
+          <th>Holat</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for order in delayed_orders %}
+          <tr>
+            <td>#{{ order.pk }}</td>
+            <td>{{ order.from_location }} → {{ order.to_location }}</td>
+            <td>{{ order.client|default:"—" }}</td>
+            <td>{% if order.assignment %}{{ order.assignment.driver.full_name }}{% else %}—{% endif %}</td>
+            <td class="nowrap">{% if order.sla_deadline_at %}{{ order.sla_deadline_at|date:"d.m H:i" }}{% else %}—{% endif %}</td>
+            <td>{% include "includes/order_status_cell.html" with order=order safe_mode=False %}</td>
+            <td><a class="btn btn-secondary btn-sm" href="{% url 'order-detail' order.pk %}">Ochish</a></td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="7">Hozircha kechikkanlar yo‘q yoki SLA vaqti kiritilmagan.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-headline">
+    <h2 class="title">Bugungi reyslar (yuk olish vaqti bo‘yicha)</h2>
+    <a class="btn btn-secondary btn-sm" href="{% url 'order-list' %}?preset=today">Filtr bilan ro‘yxat</a>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>№</th>
+          <th>Vaqt</th>
+          <th>Yo‘nalish</th>
+          <th>Klient</th>
+          <th>Shofyor</th>
+          <th>Holat</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for order in today_orders %}
+          <tr>
+            <td>#{{ order.pk }}</td>
+            <td class="nowrap">{{ order.pickup_time|date:"d.m H:i" }}</td>
+            <td>{{ order.from_location }} → {{ order.to_location }}</td>
+            <td>{{ order.client|default:"—" }}</td>
+            <td>{% if order.assignment %}{{ order.assignment.driver.full_name }}{% else %}—{% endif %}</td>
+            <td>{% include "includes/order_status_cell.html" with order=order safe_mode=False %}</td>
+            <td><a class="btn btn-secondary btn-sm" href="{% url 'order-detail' order.pk %}">Ochish</a></td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="7">Bugun yuk olish vaqti rejalashtirilgan buyurtma yo‘q.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-headline">
+    <h2 class="title">Faol buyurtmalar</h2>
+    <a class="btn btn-secondary btn-sm" href="{% url 'order-list' %}?preset=active">Barchasini ko‘rish</a>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>№</th>
+          <th>Yo‘nalish</th>
+          <th>Klient</th>
+          <th>Shofyor</th>
+          <th>Holat</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for order in active_orders_preview %}
+          <tr>
+            <td>#{{ order.pk }}</td>
+            <td>{{ order.from_location }} → {{ order.to_location }}</td>
+            <td>{{ order.client|default:"—" }}</td>
+            <td>{% if order.assignment %}{{ order.assignment.driver.full_name }}{% else %}—{% endif %}</td>
+            <td>{% include "includes/order_status_cell.html" with order=order safe_mode=False %}</td>
+            <td><a class="btn btn-secondary btn-sm" href="{% url 'order-detail' order.pk %}">Ochish</a></td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="6">Faol buyurtma yo‘q.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
 
 <div class="card">
   <h2 class="title">Joriy oy KPI</h2>

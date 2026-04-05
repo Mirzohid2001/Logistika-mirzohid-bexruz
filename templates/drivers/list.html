@@ -1,8 +1,15 @@
 {% extends "base.html" %}
-{% block title %}Shofyorlar | Shofir{% endblock %}
+{% block title %}Haydovchilar | Shofir{% endblock %}
+{% block breadcrumbs %}
+<nav class="breadcrumb-nav" aria-label="Yo‘l xaritasi">
+  <a href="{% url 'home' %}">Bosh sahifa</a>
+  <span class="breadcrumb-nav__sep" aria-hidden="true">/</span>
+  <span class="breadcrumb-nav__here">Haydovchilar</span>
+</nav>
+{% endblock %}
 {% block content %}
 <div class="card">
-  <h1 class="title">Shofyorlar ro'yxati va analitikasi</h1>
+  <h1 class="title">Haydovchilar ro‘yxati va analitikasi</h1>
   <p class="muted">Reyting, haydovchiga to‘langan summa (oy/yil), on-time, aktiv yuk va oxirgi lokatsiya. Klientdan tushum yo‘q.</p>
   <div class="actions">
     <a class="btn" href="{% url 'driver-create' %}">Yangi shofyor</a>

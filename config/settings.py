@@ -165,6 +165,13 @@ ORDERS_LIST_PER_PAGE = env.int("ORDERS_LIST_PER_PAGE", default=25)
 ANALYTICS_CLIENTS_RATING_PAGE_SIZE = env.int("ANALYTICS_CLIENTS_RATING_PAGE_SIZE", default=20)
 SPLIT_SHIPMENT_MAX_PARTS = env.int("SPLIT_SHIPMENT_MAX_PARTS", default=10)
 
+# Yangi buyurtma: standart marshrut / yuk turi (bo‘sh bo‘lsa forma to‘ldirmaydi)
+ORDER_DEFAULT_FROM_LOCATION = env("ORDER_DEFAULT_FROM_LOCATION", default="").strip()
+ORDER_DEFAULT_TO_LOCATION = env("ORDER_DEFAULT_TO_LOCATION", default="").strip()
+ORDER_DEFAULT_CARGO_TYPE = env("ORDER_DEFAULT_CARGO_TYPE", default="").strip()
+# Formada kg; maksimal (tekshiruv)
+ORDER_MAX_WEIGHT_KG = env.int("ORDER_MAX_WEIGHT_KG", default=200_000)
+
 # REST API pagination
 API_PAGE_SIZE = env.int("API_PAGE_SIZE", default=25)
 API_MAX_PAGE_SIZE = env.int("API_MAX_PAGE_SIZE", default=100)

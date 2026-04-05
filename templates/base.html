@@ -42,17 +42,21 @@
       {% with current=request.resolver_match.url_name %}
       <nav class="nav nav--main" id="primary-nav" aria-label="Asosiy menyu">
         <a
+          class="nav-link{% if current == 'home' %} nav-link--active{% endif %}"
+          href="{% url 'home' %}"
+        >Bosh sahifa</a>
+        <a
           class="nav-link{% if current in 'order-list order-detail order-live-location' %} nav-link--active{% endif %}"
           href="{% url 'order-list' %}"
         >Buyurtmalar</a>
         <a
-          class="nav-link{% if current in 'client-list client-create client-edit clients-rating-report clients-monthly-yearly-report' %} nav-link--active{% endif %}"
-          href="{% url 'client-list' %}"
-        >Klientlar</a>
-        <a
           class="nav-link{% if current in 'driver-list driver-detail driver-create' %} nav-link--active{% endif %}"
           href="{% url 'driver-list' %}"
-        >Shofyorlar</a>
+        >Haydovchilar</a>
+        <a
+          class="nav-link{% if current in 'client-list client-create client-edit clients-rating-report clients-monthly-yearly-report' %} nav-link--active{% endif %}"
+          href="{% url 'client-list' %}"
+        >Narx / tender</a>
         <a class="nav-link nav-link-accent" href="{% url 'order-create' %}">+ Yangi buyurtma</a>
         <a
           class="nav-link{% if current in 'ops-dashboard generate-monthly-report accounting-pnl-report' %} nav-link--active{% endif %}"
@@ -68,6 +72,7 @@
   </header>
 
   <main id="main-content" class="container page" tabindex="-1">
+    {% block breadcrumbs %}{% endblock %}
     <section class="admin-toolbar card">
       <div class="admin-toolbar-head">
         <h2 class="title">Boshqaruv markazi</h2>
@@ -76,11 +81,11 @@
       <div class="admin-toolbar-links">
         <a class="chip-link" href="{% url 'order-create' %}">Yangi buyurtma</a>
         <a class="chip-link" href="{% url 'order-list' %}">Buyurtmalar</a>
-        <a class="chip-link" href="{% url 'client-list' %}">Klientlar (boshqaruv)</a>
+        <a class="chip-link" href="{% url 'client-list' %}">Narx / tender (klientlar)</a>
         <a class="chip-link" href="{% url 'clients-rating-report' %}">Klient reyting</a>
         <a class="chip-link" href="{% url 'clients-monthly-yearly-report' %}">Klient hisobotlari</a>
-        <a class="chip-link" href="{% url 'driver-list' %}">Shofyorlar</a>
-        <a class="chip-link" href="{% url 'driver-create' %}">Yangi shofyor</a>
+        <a class="chip-link" href="{% url 'driver-list' %}">Haydovchilar</a>
+        <a class="chip-link" href="{% url 'driver-create' %}">Yangi haydovchi</a>
         <a class="chip-link" href="{% url 'ops-dashboard' %}">Operatsion panel</a>
         <a class="chip-link" href="{% url 'live-fleet-map' %}">Live flot xaritasi</a>
         <a class="chip-link" href="{% url 'accounting-pnl-report' %}" title="Klientdan tushum yo‘q — asosan haydovchi va chiqimlar">Buxgalteriya P&amp;L</a>

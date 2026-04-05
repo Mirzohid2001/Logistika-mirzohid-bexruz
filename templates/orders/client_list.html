@@ -1,9 +1,16 @@
 {% extends "base.html" %}
-{% block title %}Klientlar | Shofir{% endblock %}
+{% block title %}Narx / tender (klientlar) | Shofir{% endblock %}
+{% block breadcrumbs %}
+<nav class="breadcrumb-nav" aria-label="Yo‘l xaritasi">
+  <a href="{% url 'home' %}">Bosh sahifa</a>
+  <span class="breadcrumb-nav__sep" aria-hidden="true">/</span>
+  <span class="breadcrumb-nav__here">Narx / tender</span>
+</nav>
+{% endblock %}
 {% block content %}
 {% include "orders/client_tabs.html" with active_tab="crud" %}
 <div class="card">
-  <h1 class="title">Klientlar</h1>
+  <h1 class="title">Klientlar va narx</h1>
   <p class="muted" style="margin-bottom:12px">Buyurtmalar uchun yo‘nalish va SLA. Klientdan platformaga to‘lov yo‘q — kontrakt stavkalari faqat ma’lumot sifatida.</p>
   <div class="actions">
     <a class="btn" href="{% url 'client-create' %}">Yangi klient</a>

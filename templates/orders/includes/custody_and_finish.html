@@ -1,0 +1,60 @@
+{# emphasis=True: yo'lda — hajm + yakunlash bir kartada #}
+<div class="card{% if emphasis %} card--emphasis{% endif %}" id="hajm-nazorati">
+  <h2 class="title">{% if emphasis %}Yo‘lda — hajm va yakunlash{% else %}Hajm nazorati (zavod → klient){% endif %}</h2>
+  {% if emphasis %}
+    <p class="muted">Hajmni saqlang; haydovchi tugatish so‘ragan bo‘lsa, pastda «Tugallandi»ni bosing. Live xarita pastda.</p>
+  {% else %}
+    <p class="muted">Tarozi yoki o‘lchovchi bo‘yicha fakt. Litr ishlatsangiz, har bir qatorda tegishli zichlik (kg/L) kiriting; topshirish zichligini bo‘sh qoldirsangiz, yuklangan zichligi ishlatiladi.</p>
+  {% endif %}
+  <form method="post" action="{% url 'order-custody-update' order.pk %}">
+    {% csrf_token %}
+    <div class="row g-3">
+      <div class="col-md-4">
+        <label class="form-label" for="id_loaded_quantity">{{ custody_form.loaded_quantity.label }}</label>
+        {{ custody_form.loaded_quantity }}
+        {% if custody_form.loaded_quantity.errors %}<div class="text-danger small">{{ custody_form.loaded_quantity.errors }}</div>{% endif %}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label" for="id_loaded_quantity_uom">{{ custody_form.loaded_quantity_uom.label }}</label>
+        {{ custody_form.loaded_quantity_uom }}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label" for="id_density_kg_per_liter">{{ custody_form.density_kg_per_liter.label }}</label>
+        {{ custody_form.density_kg_per_liter }}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label" for="id_delivered_quantity">{{ custody_form.delivered_quantity.label }}</label>
+        {{ custody_form.delivered_quantity }}
+        {% if custody_form.delivered_quantity.errors %}<div class="text-danger small">{{ custody_form.delivered_quantity.errors }}</div>{% endif %}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label" for="id_delivered_quantity_uom">{{ custody_form.delivered_quantity_uom.label }}</label>
+        {{ custody_form.delivered_quantity_uom }}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label" for="id_delivered_density_kg_per_liter">{{ custody_form.delivered_density_kg_per_liter.label }}</label>
+        {{ custody_form.delivered_density_kg_per_liter }}
+      </div>
+      <div class="col-12 d-flex justify-content-end">
+        <button class="btn btn-primary" type="submit">Hajmni saqlash</button>
+      </div>
+    </div>
+  </form>
+
+  {% if emphasis and finish_request_exists and order.status == 'in_transit' %}
+    <hr class="my-4" style="border-color:var(--line-strong)">
+    <h3 class="title" style="font-size:1.05rem">Admin tasdiqi: reysni yopish</h3>
+    <p class="muted small">Haydovchi tugatish so‘rovi yuborilgan. Hajm to‘g‘ri bo‘lsa, quyidagi tugmani bosing.</p>
+    <form method="post" action="{% url 'order-finish-confirm' order.pk %}">
+      {% csrf_token %}
+      <div style="display:flex;flex-direction:column;gap:8px;max-width:min(620px,100%)">
+        <label class="form-label" for="shortage_note_top_{{ order.pk }}">Kamomad bo‘lsa izoh (70kg+ majburiy)</label>
+        <textarea id="shortage_note_top_{{ order.pk }}" name="shortage_note" rows="2" placeholder="Masalan: obyekt tarozisidagi akt bo‘yicha farq"></textarea>
+      </div>
+      <button class="btn btn-primary mt-2" type="submit">Tugallandi (tasdiqlash)</button>
+    </form>
+    {% if finish_request_created_at %}
+      <p class="muted small mt-2">Haydovchi so‘rovi vaqti: {{ finish_request_created_at|date:"d.m.Y H:i" }}</p>
+    {% endif %}
+  {% endif %}
+</div>

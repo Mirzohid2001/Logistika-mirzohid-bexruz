@@ -6,6 +6,7 @@ import uuid
 from orders.models import (
     ContractTariff,
     Order,
+    OrderFieldAudit,
     OrderStateLog,
     OrderStatus,
     PaymentLedger,
@@ -13,6 +14,26 @@ from orders.models import (
     PaymentTerms,
     RevenueLedger,
 )
+
+
+def log_order_field_audit(
+    order: Order,
+    field_name: str,
+    old_value,
+    new_value,
+    changed_by: str = "",
+) -> None:
+    old_s = "" if old_value is None else str(old_value)
+    new_s = "" if new_value is None else str(new_value)
+    if old_s == new_s:
+        return
+    OrderFieldAudit.objects.create(
+        order=order,
+        field_name=field_name,
+        old_value=old_s[:4000],
+        new_value=new_s[:4000],
+        changed_by=changed_by or "",
+    )
 
 
 ACTION_TO_STATUS = {

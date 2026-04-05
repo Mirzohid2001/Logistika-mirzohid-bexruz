@@ -76,6 +76,10 @@ class VehicleAdmin(admin.ModelAdmin):
         "registration_document_number",
         "registration_photo_file_id",
         "registration_photo_preview",
+        "front_photo_file_id",
+        "front_photo_preview",
+        "rear_photo_file_id",
+        "rear_photo_preview",
         "calibration_expires_at",
         "tanker_document_photo_file_id",
         "tanker_document_photo_preview",
@@ -88,6 +92,8 @@ class VehicleAdmin(admin.ModelAdmin):
 
     readonly_fields = (
         "registration_photo_preview",
+        "front_photo_preview",
+        "rear_photo_preview",
         "tanker_document_photo_preview",
     )
 
@@ -100,6 +106,14 @@ class VehicleAdmin(admin.ModelAdmin):
     @admin.display(description="Registration photo")
     def registration_photo_preview(self, obj: Vehicle) -> str:
         return self._tg_img(obj.registration_photo_file_id)
+
+    @admin.display(description="Front photo")
+    def front_photo_preview(self, obj: Vehicle) -> str:
+        return self._tg_img(obj.front_photo_file_id)
+
+    @admin.display(description="Rear photo")
+    def rear_photo_preview(self, obj: Vehicle) -> str:
+        return self._tg_img(obj.rear_photo_file_id)
 
     @admin.display(description="Tanker document photo")
     def tanker_document_photo_preview(self, obj: Vehicle) -> str:

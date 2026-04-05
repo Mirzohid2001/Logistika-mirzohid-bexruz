@@ -13,7 +13,7 @@ DEFAULT_COMMANDS: list[dict[str, str]] = [
     {"command": "finish_trip", "description": "Safarni tugatish so‘rovi"},
     {"command": "trip_map", "description": "Reys xaritasi"},
     {"command": "wizard", "description": "Tezkor qadamlar"},
-    {"command": "add_vehicle", "description": "Yangi mashina qo‘shish (raqam + sig‘im)"},
+    {"command": "add_vehicle", "description": "Qo‘shimcha mashina (2+ avto; raqam + sig‘im)"},
     {"command": "checkpoint", "description": "Oraliq eslatma"},
     {"command": "trip_summary", "description": "Qisqa hisobot"},
     {"command": "yuklandi", "description": "Yuklangan hajm (masalan tonna)"},

@@ -4,11 +4,13 @@ from django.conf import settings as dj_settings
 from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
 from django.db import DatabaseError, connection, transaction
+from django.db.models import Q
 from django.http import JsonResponse
 from django.utils import timezone
 from django.shortcuts import get_object_or_404, redirect, render
 from decimal import Decimal
 from decimal import InvalidOperation
+import datetime
 import json
 import re
 
@@ -16,7 +18,7 @@ from bot.services import driver_idle_reply_keyboard, send_chat_message, send_ops
 from common.permissions import WEB_OPERATION_GROUPS, WEB_PANEL_GROUPS, groups_required
 from dispatch.models import Assignment, DriverOfferApproval, DriverOfferDecision, DriverOfferResponse
 from drivers.forms import DriverDeliveryReviewForm
-from drivers.models import DriverDeliveryReview, DriverStatus
+from drivers.models import Driver, DriverDeliveryReview, DriverStatus
 from drivers.services import get_driver_review_aggregates, recompute_driver_rating_score
 from bot.models import TelegramMessageLog
 from dispatch.services import assign_order
@@ -32,10 +34,111 @@ from .forms import (
     OrderSealAddForm,
     OrderSealUpdateForm,
 )
+
 from .models import Client, Order, OrderExtraExpense, OrderSeal, OrderStatus, QuantityUnit
 from .quantity import quantity_to_metric_tonnes, shortage_tonnes
-from .services import apply_client_contract, create_return_trip, reopen_order, split_shipment, transition_order
+from .services import (
+    apply_client_contract,
+    create_return_trip,
+    log_order_field_audit,
+    reopen_order,
+    split_shipment,
+    transition_order,
+)
 from tracking.models import LocationPing
+
+# Buyurtmalar ro‘yxati: filter dropdown uchun qisqa o‘zbekcha yozuvlar
+ORDER_STATUS_LABELS_UZ = {
+    "new": "Yangi",
+    "offered": "Taklif",
+    "assigned": "Biriktirilgan",
+    "in_transit": "Yo‘lda",
+    "completed": "Yakunlangan",
+    "canceled": "Bekor",
+    "issue": "Muammo",
+}
+
+
+def _extract_coords_for_route(text: str) -> tuple[float, float] | None:
+    if not text:
+        return None
+    m = re.search(r"(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)", str(text))
+    if not m:
+        return None
+    return float(m.group(1)), float(m.group(2))
+
+
+def _apply_route_geofence_to_order(order: Order) -> None:
+    """Koordinatalar bo‘lsa marshrut va oddiy bbox geofence to‘ldiriladi."""
+    from_latlon = _extract_coords_for_route(order.from_location)
+    to_latlon = _extract_coords_for_route(order.to_location)
+    if not from_latlon or not to_latlon:
+        return
+    from_lat, from_lon = from_latlon
+    to_lat, to_lon = to_latlon
+    if not order.route_polyline:
+        order.route_polyline = [{"lat": from_lat, "lon": from_lon}, {"lat": to_lat, "lon": to_lon}]
+    if not order.geofence_polygon:
+        margin = 0.03
+        min_lat = min(from_lat, to_lat) - margin
+        max_lat = max(from_lat, to_lat) + margin
+        min_lon = min(from_lon, to_lon) - margin
+        max_lon = max(from_lon, to_lon) + margin
+        order.geofence_polygon = [
+            {"lat": min_lat, "lon": min_lon},
+            {"lat": min_lat, "lon": max_lon},
+            {"lat": max_lat, "lon": max_lon},
+            {"lat": max_lat, "lon": min_lon},
+        ]
+
+
+def _save_new_order_with_quote(order: Order) -> None:
+    order.price_suggested = suggest_price(order.weight_ton)
+    apply_client_contract(order, set_client_price=False)
+    order.client_price = Decimal("0")
+    order.save()
+    breakdown = build_price_breakdown(
+        distance_km=Decimal(str(order.weight_ton)) * Decimal("8"),
+        weight_ton=Decimal(str(order.weight_ton)),
+        wait_minutes=0,
+        empty_return_km=Decimal(str(order.weight_ton)) * Decimal("2"),
+    )
+    PriceQuote.objects.create(
+        order=order,
+        distance_km=Decimal(str(order.weight_ton)) * Decimal("8"),
+        base_rate=breakdown["base_rate"],
+        weight_ton=Decimal(str(order.weight_ton)),
+        wait_minutes=0,
+        empty_return_km=Decimal(str(order.weight_ton)) * Decimal("2"),
+        peak_coef=breakdown["peak_coef"],
+        distance_cost=breakdown["distance_cost"],
+        weight_cost=breakdown["weight_cost"],
+        wait_cost=breakdown["wait_cost"],
+        empty_return_cost=breakdown["empty_return_cost"],
+        cargo_coef=breakdown["cargo_coef"],
+        suggested_price=breakdown["suggested_price"],
+        final_price=order.client_price,
+        is_approved=True,
+    )
+
+
+def _form_errors_text(form) -> str:
+    parts: list[str] = []
+    for field, errs in form.errors.items():
+        label = "" if field == "__all__" else f"{field}: "
+        for e in errs:
+            parts.append(f"{label}{e}")
+    return "; ".join(parts) if parts else "xato"
+
+
+def _orders_preserve_get_params(request) -> str:
+    p = request.GET.copy()
+    p.pop("page", None)
+    return p.urlencode()
+
+
+def _orders_status_choices_uz():
+    return [(code, ORDER_STATUS_LABELS_UZ.get(code, label)) for code, label in OrderStatus.choices]
 
 
 def _web_actor_username(request) -> str:
@@ -136,34 +239,67 @@ def _custody_cells_for_list(
 @staff_member_required
 def order_list(request):
     try:
-        qs = (
-            Order.objects.select_related("client")
-            .only(
-                "id",
-                "from_location",
-                "to_location",
-                "client__name",
-                "cargo_type",
-                "weight_ton",
-                "loaded_quantity",
-                "loaded_quantity_uom",
-                "delivered_quantity",
-                "delivered_quantity_uom",
-                "density_kg_per_liter",
-                "delivered_density_kg_per_liter",
-                "client_price",
-                "driver_fee",
-                "fuel_cost",
-                "extra_cost",
-                "penalty_amount",
-                "status",
-                "created_at",
-            )
-            .order_by("-created_at")
-        )
+        qs = Order.objects.select_related("client", "assignment__driver").order_by("-created_at")
+        preset = (request.GET.get("preset") or "").strip()
         status = (request.GET.get("status") or "").strip()
+        search_q = (request.GET.get("q") or "").strip()
+        date_str = (request.GET.get("date") or "").strip()
+        driver_filter = (request.GET.get("driver") or "").strip()
+        client_filter = (request.GET.get("client") or "").strip()
+        view_mode = (request.GET.get("view") or "full").strip()
+        if view_mode not in {"full", "minimal"}:
+            view_mode = "full"
+
+        if preset == "today":
+            date_str = timezone.localdate().isoformat()
+
+        active_statuses = [
+            OrderStatus.NEW,
+            OrderStatus.OFFERED,
+            OrderStatus.ASSIGNED,
+            OrderStatus.IN_TRANSIT,
+        ]
+        now = timezone.now()
+        if preset == "delayed":
+            qs = qs.filter(
+                sla_deadline_at__isnull=False,
+                sla_deadline_at__lt=now,
+                status__in=active_statuses,
+            )
+        elif preset == "active" and status not in {c[0] for c in OrderStatus.choices}:
+            qs = qs.filter(status__in=active_statuses)
+
+        if date_str:
+            try:
+                day = datetime.date.fromisoformat(date_str)
+                start = timezone.make_aware(datetime.datetime.combine(day, datetime.time.min))
+                end = start + datetime.timedelta(days=1)
+                qs = qs.filter(pickup_time__gte=start, pickup_time__lt=end)
+            except ValueError:
+                pass
+
         if status in {c[0] for c in OrderStatus.choices}:
             qs = qs.filter(status=status)
+
+        if driver_filter.isdigit():
+            qs = qs.filter(assignment__driver_id=int(driver_filter))
+        if client_filter.isdigit():
+            qs = qs.filter(client_id=int(client_filter))
+
+        if search_q:
+            sq = (
+                Q(contact_phone__icontains=search_q)
+                | Q(client__name__icontains=search_q)
+                | Q(client__phone__icontains=search_q)
+                | Q(assignment__driver__full_name__icontains=search_q)
+                | Q(assignment__driver__phone__icontains=search_q)
+                | Q(from_location__icontains=search_q)
+                | Q(to_location__icontains=search_q)
+            )
+            if search_q.isdigit():
+                sq |= Q(pk=int(search_q))
+            qs = qs.filter(sq)
+
         paginator = Paginator(qs, int(getattr(dj_settings, "ORDERS_LIST_PER_PAGE", 25) or 25))
         page_obj = paginator.get_page(request.GET.get("page"))
         visible_orders = list(page_obj.object_list)
@@ -180,7 +316,6 @@ def order_list(request):
                 if oid not in latest_ping_map:
                     latest_ping_map[oid] = row["captured_at"]
         stale_sec = int(getattr(dj_settings, "ORDER_LIVE_STALE_SEC", 600) or 600)
-        now = timezone.now()
         for order in visible_orders:
             cap = latest_ping_map.get(order.pk)
             order.live_ping_at = cap
@@ -193,6 +328,8 @@ def order_list(request):
                 order.live_ping_age_sec = age
                 order.live_ping_age_label = _format_age_short(age)
                 order.live_ping_stale = age >= stale_sec
+        drivers_qs = Driver.objects.order_by("full_name")[:800]
+        clients_qs = Client.objects.filter(is_active=True).order_by("name")[:800]
         return render(
             request,
             "orders/list.html",
@@ -202,7 +339,17 @@ def order_list(request):
                 "safe_mode": False,
                 "status_filter": status,
                 "order_status_choices": OrderStatus.choices,
+                "order_status_choices_uz": _orders_status_choices_uz(),
                 "order_live_stale_sec": stale_sec,
+                "search_q": search_q,
+                "date_filter": date_str,
+                "driver_filter": driver_filter,
+                "client_filter": client_filter,
+                "preset": preset,
+                "view_mode": view_mode,
+                "request_params": _orders_preserve_get_params(request),
+                "drivers_for_filter": drivers_qs,
+                "clients_for_filter": clients_qs,
             },
         )
     except InvalidOperation:
@@ -217,66 +364,8 @@ def order_create(request):
         form = OrderCreateForm(request.POST)
         if form.is_valid():
             order: Order = form.save(commit=False)
-            # Operatorga qulaylik: faqat "Qayerdan/Qayerga" ni tanlagan bo'lsa,
-            # marshrut + geofence-ni avtomatik generatsiya qilamiz.
-            def _extract_coords(text: str) -> tuple[float, float] | None:
-                if not text:
-                    return None
-                m = re.search(r"(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)", str(text))
-                if not m:
-                    return None
-                return float(m.group(1)), float(m.group(2))
-
-            from_latlon = _extract_coords(order.from_location)
-            to_latlon = _extract_coords(order.to_location)
-            if from_latlon and to_latlon:
-                from_lat, from_lon = from_latlon
-                to_lat, to_lon = to_latlon
-
-                if not order.route_polyline:
-                    order.route_polyline = [{"lat": from_lat, "lon": from_lon}, {"lat": to_lat, "lon": to_lon}]
-
-                if not order.geofence_polygon:
-                    # Oddiy bbox geofence: operatorga tezkor qulaylik uchun.
-                    # (Marshrut bo'yicha aniq poligon keyinroq kengaytiriladi.)
-                    margin = 0.03
-                    min_lat = min(from_lat, to_lat) - margin
-                    max_lat = max(from_lat, to_lat) + margin
-                    min_lon = min(from_lon, to_lon) - margin
-                    max_lon = max(from_lon, to_lon) + margin
-                    order.geofence_polygon = [
-                        {"lat": min_lat, "lon": min_lon},
-                        {"lat": min_lat, "lon": max_lon},
-                        {"lat": max_lat, "lon": max_lon},
-                        {"lat": max_lat, "lon": min_lon},
-                    ]
-            order.price_suggested = suggest_price(order.weight_ton)
-            apply_client_contract(order, set_client_price=False)
-            order.client_price = Decimal("0")
-            order.save()
-            breakdown = build_price_breakdown(
-                distance_km=Decimal(str(order.weight_ton)) * Decimal("8"),
-                weight_ton=Decimal(str(order.weight_ton)),
-                wait_minutes=0,
-                empty_return_km=Decimal(str(order.weight_ton)) * Decimal("2"),
-            )
-            PriceQuote.objects.create(
-                order=order,
-                distance_km=Decimal(str(order.weight_ton)) * Decimal("8"),
-                base_rate=breakdown["base_rate"],
-                weight_ton=Decimal(str(order.weight_ton)),
-                wait_minutes=0,
-                empty_return_km=Decimal(str(order.weight_ton)) * Decimal("2"),
-                peak_coef=breakdown["peak_coef"],
-                distance_cost=breakdown["distance_cost"],
-                weight_cost=breakdown["weight_cost"],
-                wait_cost=breakdown["wait_cost"],
-                empty_return_cost=breakdown["empty_return_cost"],
-                cargo_coef=breakdown["cargo_coef"],
-                suggested_price=breakdown["suggested_price"],
-                final_price=order.client_price,
-                is_approved=True,
-            )
+            _apply_route_geofence_to_order(order)
+            _save_new_order_with_quote(order)
             if not send_order_to_group(order):
                 messages.warning(
                     request,
@@ -290,7 +379,21 @@ def order_create(request):
             messages.success(request, f"Buyurtma #{order.pk} yaratildi.")
             return redirect("order-detail", pk=order.pk)
     else:
-        form = OrderCreateForm()
+        initial = {}
+        now = timezone.localtime()
+        start = now.replace(minute=0, second=0, microsecond=0)
+        pt = start + datetime.timedelta(hours=1) if now >= start else start
+        initial["pickup_time"] = pt.strftime("%Y-%m-%d %H:%M")
+        fl = (getattr(dj_settings, "ORDER_DEFAULT_FROM_LOCATION", "") or "").strip()
+        tl = (getattr(dj_settings, "ORDER_DEFAULT_TO_LOCATION", "") or "").strip()
+        cg = (getattr(dj_settings, "ORDER_DEFAULT_CARGO_TYPE", "") or "").strip()
+        if fl:
+            initial["from_location"] = fl
+        if tl:
+            initial["to_location"] = tl
+        if cg:
+            initial["cargo_type"] = cg
+        form = OrderCreateForm(initial=initial)
     return render(request, "orders/create.html", {"form": form})
 
 
@@ -444,6 +547,9 @@ def order_detail(request, pk: int):
     except Exception:
         big_alloc = None
 
+    state_logs = list(order.state_logs.order_by("-created_at")[:25])
+    field_audits = list(order.field_audits.order_by("-created_at")[:40])
+
     return render(
         request,
         "orders/detail.html",
@@ -475,6 +581,8 @@ def order_detail(request, pk: int):
             "tender_duration_default": t_dur_default,
             "split_shipment_max_parts": split_max,
             "big_order_allocation": big_alloc,
+            "state_logs": state_logs,
+            "field_audits": field_audits,
         },
     )
 
@@ -721,26 +829,43 @@ def order_finish_confirm(request, pk: int):
     return redirect("order-detail", pk=order.pk)
 
 
+_CUSTODY_AUDIT_FIELDS = (
+    "loaded_quantity",
+    "loaded_quantity_uom",
+    "delivered_quantity",
+    "delivered_quantity_uom",
+    "density_kg_per_liter",
+    "delivered_density_kg_per_liter",
+)
+
+
 @staff_member_required
 def order_custody_update(request, pk: int):
     """Yuklangan / topshirilgan hajm va zichlik (web)."""
     order = get_object_or_404(Order, pk=pk)
     if request.method != "POST":
         return redirect("order-detail", pk=pk)
+    before = {f: getattr(order, f) for f in _CUSTODY_AUDIT_FIELDS}
     form = OrderCustodyForm(request.POST, instance=order)
     if not form.is_valid():
-        messages.error(request, "Hajm formalari noto‘g‘ri to‘ldirilgan.")
+        messages.error(request, "Hajm ma'lumotlari: " + _form_errors_text(form))
         return redirect("order-detail", pk=pk)
     obj = form.save(commit=False)
     username = getattr(request.user, "username", None) or str(request.user.pk)
+    actor = f"web:{username}"
     now = timezone.now()
     if "loaded_quantity" in form.changed_data and obj.loaded_quantity is not None:
         obj.loaded_recorded_at = now
-        obj.loaded_recorded_by = f"web:{username}"
+        obj.loaded_recorded_by = actor
     if "delivered_quantity" in form.changed_data and obj.delivered_quantity is not None:
         obj.delivered_recorded_at = now
-        obj.delivered_recorded_by = f"web:{username}"
+        obj.delivered_recorded_by = actor
     obj.save()
+    for fname in _CUSTODY_AUDIT_FIELDS:
+        old_v = before.get(fname)
+        new_v = getattr(obj, fname)
+        if old_v != new_v:
+            log_order_field_audit(obj, fname, old_v, new_v, actor)
     messages.success(request, "Hajm va zichlik ma'lumotlari saqlandi.")
     return redirect("order-detail", pk=pk)
 
@@ -1211,6 +1336,16 @@ def _render_order_list_safe(request):
             "safe_mode": True,
             "status_filter": status_filter,
             "order_status_choices": OrderStatus.choices,
+            "order_status_choices_uz": _orders_status_choices_uz(),
+            "search_q": "",
+            "date_filter": "",
+            "driver_filter": "",
+            "client_filter": "",
+            "preset": "",
+            "view_mode": "full",
+            "request_params": _orders_preserve_get_params(request),
+            "drivers_for_filter": [],
+            "clients_for_filter": [],
         },
     )
 
@@ -1358,9 +1493,14 @@ def order_tender_close(request, pk: int):
         best = session.bids.order_by("score", "eta_minutes", "bid_price").first()
         if best:
             session.auto_selected_bid = best
+            old_cp = locked_order.client_price
+            old_pf = locked_order.price_final
             locked_order.price_final = best.bid_price
             locked_order.client_price = best.bid_price
             locked_order.save(update_fields=["price_final", "client_price", "updated_at"])
+            by = getattr(request.user, "username", None) or str(request.user.pk)
+            log_order_field_audit(locked_order, "client_price", old_cp, locked_order.client_price, by)
+            log_order_field_audit(locked_order, "price_final", old_pf, locked_order.price_final, by)
         session.closed_at = timezone.now()
         session.save(update_fields=["closed_at", "auto_selected_bid"])
         messages.success(request, f"Tender yopildi. {'Golib tanlandi.' if best else 'Bid yoq.'}")

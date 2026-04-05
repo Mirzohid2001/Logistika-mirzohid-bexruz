@@ -1,8 +1,6 @@
 from django.contrib import admin
-from django.http import HttpResponse
-import csv
 
-from .models import Client, ContractTariff, Order, OrderSeal, OrderStateLog, PaymentLedger, RevenueLedger
+from .models import Client, ContractTariff, Order, OrderFieldAudit, OrderSeal, OrderStateLog, PaymentLedger, RevenueLedger
 from .services import create_return_trip, reopen_order, split_shipment
 
 
@@ -66,7 +64,7 @@ class OrderAdmin(admin.ModelAdmin):
     )
     list_filter = ("status", "cargo_type", "client", "payment_terms", "created_at")
     search_fields = ("from_location", "to_location", "contact_name", "contact_phone", "client__name")
-    actions = ("export_orders_csv", "action_reopen_orders", "action_create_return_trip", "action_split_two")
+    actions = ("action_reopen_orders", "action_create_return_trip", "action_split_two")
 
     @admin.display(description="Margin")
     def gross_margin_display(self, obj: Order):
@@ -93,27 +91,6 @@ class OrderAdmin(admin.ModelAdmin):
         except Exception:
             return "-"
 
-    @admin.action(description="Export selected orders to CSV")
-    def export_orders_csv(self, request, queryset):
-        response = HttpResponse(content_type="text/csv")
-        response["Content-Disposition"] = 'attachment; filename="orders_export.csv"'
-        writer = csv.writer(response)
-        writer.writerow(["ID", "Client", "From", "To", "Status", "ClientPrice", "DriverFee", "GrossMargin"])
-        for order in queryset:
-            writer.writerow(
-                [
-                    order.pk,
-                    order.client.name if order.client else "",
-                    order.from_location,
-                    order.to_location,
-                    order.status,
-                    order.client_price,
-                    order.driver_fee,
-                    order.gross_margin,
-                ]
-            )
-        return response
-
     @admin.action(description="Reopen selected orders to Issue")
     def action_reopen_orders(self, request, queryset):
         for order in queryset:
@@ -134,6 +111,13 @@ class OrderAdmin(admin.ModelAdmin):
 class OrderStateLogAdmin(admin.ModelAdmin):
     list_display = ("order", "from_status", "to_status", "changed_by", "created_at")
     list_filter = ("to_status",)
+
+
+@admin.register(OrderFieldAudit)
+class OrderFieldAuditAdmin(admin.ModelAdmin):
+    list_display = ("order", "field_name", "old_value", "new_value", "changed_by", "created_at")
+    list_filter = ("field_name",)
+    search_fields = ("order__id", "changed_by", "field_name")
 
 
 @admin.register(PaymentLedger)

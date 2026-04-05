@@ -6,12 +6,21 @@
   <p class="muted">To'liq analitika: trend, top yo'nalishlar, muammo sabablari, lokatsiyalar</p>
   <div class="actions">
     <a class="btn btn-secondary" href="{% url 'driver-edit' driver.id %}">Shofyorni tahrirlash</a>
-    <a class="btn" href="{% url 'vehicle-create' driver.id %}">Mashina qo'shish</a>
+    <a class="btn" href="{% url 'vehicle-create' driver.id %}">Qo‘shimcha mashina (admin)</a>
   </div>
 </div>
 
 <div class="card">
   <h2 class="title">Hujjatlar va tasdiqlash</h2>
+  <p class="muted" style="margin-bottom:12px;line-height:1.45" role="note">
+    <b>Bot (yangi ro‘yxatdan o‘tish, 5 qadam):</b>
+    majburiy — haydovchilik guvohnomasi rasmi; mashina bo‘yicha texpasport, oldi va orqa rasmlar, sig‘im (kg).
+    Birinchi avto shu yerda; <b>qo‘shimcha avto</b> haydovchi botda <code>/add_vehicle</code> yoki bu yerda «Qo‘shimcha mashina» orqali.
+    <br/>
+    <b>Eski yozuvlar / qoʻlda kiritilgan:</b> guvohnoma raqami va sanalari, kalibrovka, sisterna hujjati va boshqalar
+    <b>ixtiyoriy</b> — bo‘sh qolishi mumkin (muddat tekshiruvi faqat to‘ldirilgan maydonlar uchun).
+  </p>
+  <h3 class="title" style="font-size:1.05rem;margin-top:8px">Haydovchi</h3>
   <div class="meta-grid">
     <div class="meta-item"><b>Tasdiqlash holati</b>
       <span>
@@ -20,23 +29,23 @@
         {% if driver.verification_status == "rejected" %}❌ Rad etilgan{% endif %}
       </span>
     </div>
-    <div class="meta-item"><b>Guvohnoma raqami</b><span>{{ driver.license_number|default:"-" }}</span></div>
-    <div class="meta-item"><b>Berilgan</b><span>{{ driver.license_issued_at|default:"-" }}</span></div>
-    <div class="meta-item"><b>Tugash</b><span>{{ driver.license_expires_at|default:"-" }}</span></div>
-    <div class="meta-item"><b>Guvohnoma rasmi</b>
+    <div class="meta-item"><b>Guvohnoma raqami</b> <span class="muted">(ixtiyoriy)</span><span>{{ driver.license_number|default:"-" }}</span></div>
+    <div class="meta-item"><b>Berilgan</b> <span class="muted">(ixtiyoriy)</span><span>{{ driver.license_issued_at|default:"-" }}</span></div>
+    <div class="meta-item"><b>Tugash</b> <span class="muted">(ixtiyoriy)</span><span>{{ driver.license_expires_at|default:"-" }}</span></div>
+    <div class="meta-item"><b>Guvohnoma rasmi</b> <span class="muted">(bot: majburiy)</span>
       <span>
         {% if driver.license_photo_file_id %}
           <a href="{% url 'driver-telegram-file' driver.license_photo_file_id %}" target="_blank">
-            <img style="max-width:120px;max-height:80px;border-radius:8px;border:1px solid #e5e7eb" src="{% url 'driver-telegram-file' driver.license_photo_file_id %}" />
+            <img style="max-width:120px;max-height:80px;border-radius:8px;border:1px solid #e5e7eb" alt="Guvohnoma" src="{% url 'driver-telegram-file' driver.license_photo_file_id %}" />
           </a>
         {% else %}-{% endif %}
       </span>
     </div>
-    <div class="meta-item"><b>Ro'yxatga olish rasmi</b>
+    <div class="meta-item"><b>Ro‘yxatga olish rasmi (haydovchi kartochkasi)</b> <span class="muted">(eski / ixtiyoriy; yangi oqimda texpasport mashina blokida)</span>
       <span>
         {% if driver.registration_photo_file_id %}
           <a href="{% url 'driver-telegram-file' driver.registration_photo_file_id %}" target="_blank">
-            <img style="max-width:120px;max-height:80px;border-radius:8px;border:1px solid #e5e7eb" src="{% url 'driver-telegram-file' driver.registration_photo_file_id %}" />
+            <img style="max-width:120px;max-height:80px;border-radius:8px;border:1px solid #e5e7eb" alt="Ro‘yxatga olish" src="{% url 'driver-telegram-file' driver.registration_photo_file_id %}" />
           </a>
         {% else %}-{% endif %}
       </span>
@@ -83,34 +92,56 @@
 
 <div class="card">
   <h2 class="title">Mashinalar</h2>
+  <p class="muted" style="margin-bottom:10px">Texpasport, oldi va orqa — botdagi yangi topshiruvda <b>majburiy</b>. Kalibrovka va sisterna rasmi — <b>ixtiyoriy</b> (eski talablar).</p>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Nomer</th><th>Turi</th><th>Sig'im</th><th>Kalibrovka tugash</th><th>Hujjat</th><th>Amallar</th></tr></thead>
+      <thead>
+        <tr>
+          <th>Nomer</th>
+          <th>Turi</th>
+          <th>Sig‘im (t)</th>
+          <th>Texpasport</th>
+          <th>Oldi</th>
+          <th>Orqa</th>
+          <th>Kalibrovka <span class="muted">(ixtiyoriy)</span></th>
+          <th>Sisterna hujjati <span class="muted">(ixtiyoriy)</span></th>
+          <th>Amallar</th>
+        </tr>
+      </thead>
       <tbody>
       {% for vehicle in driver.vehicles.all %}
         <tr>
           <td>{{ vehicle.plate_number }}</td>
           <td>{{ vehicle.vehicle_type }}</td>
           <td>{{ vehicle.capacity_ton }}</td>
-          <td>{{ vehicle.calibration_expires_at|default:"-" }}</td>
           <td>
             {% if vehicle.registration_photo_file_id %}
-              <div style="margin-bottom:6px">
-                <a href="{% url 'driver-telegram-file' vehicle.registration_photo_file_id %}" target="_blank">
-                  <img style="max-width:90px;max-height:60px;border-radius:8px;border:1px solid #e5e7eb" src="{% url 'driver-telegram-file' vehicle.registration_photo_file_id %}" />
-                </a>
-              </div>
-            {% endif %}
-
+              <a href="{% url 'driver-telegram-file' vehicle.registration_photo_file_id %}" target="_blank">
+                <img style="max-width:90px;max-height:60px;border-radius:8px;border:1px solid #e5e7eb" alt="Texpasport" src="{% url 'driver-telegram-file' vehicle.registration_photo_file_id %}" />
+              </a>
+            {% else %}-{% endif %}
+          </td>
+          <td>
+            {% if vehicle.front_photo_file_id %}
+              <a href="{% url 'driver-telegram-file' vehicle.front_photo_file_id %}" target="_blank">
+                <img style="max-width:90px;max-height:60px;border-radius:8px;border:1px solid #e5e7eb" alt="Oldi" src="{% url 'driver-telegram-file' vehicle.front_photo_file_id %}" />
+              </a>
+            {% else %}-{% endif %}
+          </td>
+          <td>
+            {% if vehicle.rear_photo_file_id %}
+              <a href="{% url 'driver-telegram-file' vehicle.rear_photo_file_id %}" target="_blank">
+                <img style="max-width:90px;max-height:60px;border-radius:8px;border:1px solid #e5e7eb" alt="Orqa" src="{% url 'driver-telegram-file' vehicle.rear_photo_file_id %}" />
+              </a>
+            {% else %}-{% endif %}
+          </td>
+          <td>{{ vehicle.calibration_expires_at|default:"-" }}</td>
+          <td>
             {% if vehicle.tanker_document_photo_file_id %}
               <a href="{% url 'driver-telegram-file' vehicle.tanker_document_photo_file_id %}" target="_blank">
-                <img style="max-width:90px;max-height:60px;border-radius:8px;border:1px solid #e5e7eb" src="{% url 'driver-telegram-file' vehicle.tanker_document_photo_file_id %}" />
+                <img style="max-width:90px;max-height:60px;border-radius:8px;border:1px solid #e5e7eb" alt="Sisterna" src="{% url 'driver-telegram-file' vehicle.tanker_document_photo_file_id %}" />
               </a>
-            {% endif %}
-
-            {% if not vehicle.registration_photo_file_id and not vehicle.tanker_document_photo_file_id %}
-              -
-            {% endif %}
+            {% else %}-{% endif %}
           </td>
           <td>
             <a class="btn btn-secondary" href="{% url 'vehicle-edit' driver.id vehicle.id %}">Tahrirlash</a>
@@ -120,7 +151,7 @@
           </td>
         </tr>
       {% empty %}
-        <tr><td colspan="6">Mashina topilmadi.</td></tr>
+        <tr><td colspan="9">Mashina topilmadi.</td></tr>
       {% endfor %}
       </tbody>
     </table>

@@ -39,15 +39,10 @@ def _driver_doc_score(driver: Driver) -> dict:
     near_days = int(getattr(settings, "DRIVER_DOC_EXPIRY_NEAR_DAYS", 30) or 30)
     near_until = today + timedelta(days=near_days)
 
-    # License requirements (4 items)
-    license_items = [
-        bool(driver.license_number),
-        driver.license_issued_at is not None,
-        driver.license_expires_at is not None,
-        bool(driver.license_photo_file_id),
-    ]
+    # License: bot orqali faqat guvohnoma rasmi talab qilinadi.
+    license_items = [bool(driver.license_photo_file_id)]
     license_present = sum(1 for x in license_items if x)
-    license_total = 4
+    license_total = 1
 
     vehicles = list(driver.vehicles.all())
     if not vehicles:
@@ -58,10 +53,10 @@ def _driver_doc_score(driver: Driver) -> dict:
         vehicle_present = 0
         for v in vehicles:
             vehicle_items = [
-                bool(v.registration_document_number),
                 bool(v.registration_photo_file_id),
-                v.calibration_expires_at is not None,
-                bool(v.tanker_document_photo_file_id),
+                bool(v.front_photo_file_id),
+                bool(v.rear_photo_file_id),
+                bool(v.capacity_ton and v.capacity_ton > 0),
             ]
             vehicle_total += 4
             vehicle_present += sum(1 for x in vehicle_items if x)

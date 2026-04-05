@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 from analytics.models import AlertEvent, AlertType
 from bot.copy_uz import REGISTER_FIRST
 from bot.services import (
+    BTN_REPLY_ADD_VEHICLE,
     build_active_trip_focus_message_html,
     build_order_keyboard,
     build_order_text,
@@ -24,7 +25,7 @@ from dispatch.models import DriverOfferApproval, DriverOfferDecision, DriverOffe
 from bot.tasks import reverse_geocode_yandex_task, update_order_telegram_text_task
 from bot.models import TelegramMessageLog
 from dispatch.models import Assignment
-from drivers.models import Driver, DriverStatus, Vehicle
+from drivers.models import Driver, DriverStatus, DriverVerificationStatus, Vehicle
 from orders.models import Order, OrderStatus, QuantityUnit
 from bot.models import DriverOnboardingState
 from django.core.cache import cache
@@ -146,6 +147,104 @@ class BotWebhookTests(TestCase):
         self.assertEqual(ping.source, LocationSource.TELEGRAM)
         self.assertAlmostEqual(float(ping.latitude), 41.31, places=4)
         self.assertAlmostEqual(float(ping.longitude), 69.28, places=4)
+
+    @override_settings(TELEGRAM_LIVE_LOCATION_SAVE_INTERVAL_SEC=0, GPS_MAX_DISTANCE_FROM_ORDER_KM=50)
+    def test_live_location_far_from_pickup_still_saved_when_edited_message(self):
+        """Jonli joylashuv (edit_date) yuklash koordinatasidan uzoqda bo‘lsa ham saqlanadi."""
+        driver = Driver.objects.create(
+            full_name="Live Far",
+            phone="+998900000077",
+            telegram_user_id=88002,
+            status=DriverStatus.BUSY,
+        )
+        self.order.from_location = "41.31, 69.28"
+        self.order.status = OrderStatus.ASSIGNED
+        self.order.save(update_fields=["from_location", "status", "updated_at"])
+        Assignment.objects.create(order=self.order, driver=driver, assigned_by="dispatcher")
+        ts = int(timezone.now().timestamp())
+        payload = {
+            "update_id": 9_000_002,
+            "edited_message": {
+                "message_id": 502,
+                "chat": {"id": 88002},
+                "from": {"id": 88002, "username": "lf"},
+                "date": ts,
+                "edit_date": ts + 5,
+                "location": {"latitude": 42.6, "longitude": 69.28},
+            },
+        }
+        response = self.client.post(
+            reverse("telegram-webhook"),
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(LocationPing.objects.filter(order=self.order, driver=driver).exists())
+
+    @override_settings(TELEGRAM_LIVE_LOCATION_SAVE_INTERVAL_SEC=0, GPS_MAX_DISTANCE_FROM_ORDER_KM=50)
+    @patch("bot.views.send_chat_message")
+    def test_one_time_location_far_from_order_not_saved(self, _send):
+        """Bir martalik GPS (live_period/edit_date yo‘q): masofa limitdan oshsa ping yozilmaydi."""
+        driver = Driver.objects.create(
+            full_name="Once Far",
+            phone="+998900000076",
+            telegram_user_id=88003,
+            status=DriverStatus.BUSY,
+        )
+        self.order.from_location = "41.31, 69.28"
+        self.order.status = OrderStatus.ASSIGNED
+        self.order.save(update_fields=["from_location", "status", "updated_at"])
+        Assignment.objects.create(order=self.order, driver=driver, assigned_by="dispatcher")
+        ts = int(timezone.now().timestamp())
+        payload = {
+            "update_id": 9_000_003,
+            "message": {
+                "message_id": 503,
+                "chat": {"id": 88003},
+                "from": {"id": 88003, "username": "of"},
+                "date": ts,
+                "location": {"latitude": 42.6, "longitude": 69.28},
+            },
+        }
+        response = self.client.post(
+            reverse("telegram-webhook"),
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(LocationPing.objects.filter(order=self.order, driver=driver).exists())
+
+    @override_settings(TELEGRAM_LIVE_LOCATION_SAVE_INTERVAL_SEC=0)
+    @patch("bot.views.send_chat_message")
+    def test_edited_message_location_saves_without_from_uses_private_chat_id(self, _send):
+        """edited_message da `from` bo‘lmasa, shaxsiy chat id haydovchi tg id ga teng."""
+        driver = Driver.objects.create(
+            full_name="No From",
+            phone="+998900000075",
+            telegram_user_id=88004,
+            status=DriverStatus.BUSY,
+        )
+        self.order.status = OrderStatus.ASSIGNED
+        self.order.save(update_fields=["status", "updated_at"])
+        Assignment.objects.create(order=self.order, driver=driver, assigned_by="dispatcher")
+        ts = int(timezone.now().timestamp())
+        payload = {
+            "update_id": 9_000_004,
+            "edited_message": {
+                "message_id": 504,
+                "chat": {"id": 88004, "type": "private"},
+                "date": ts,
+                "edit_date": ts + 1,
+                "location": {"latitude": 41.31, "longitude": 69.28},
+            },
+        }
+        response = self.client.post(
+            reverse("telegram-webhook"),
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(LocationPing.objects.filter(order=self.order, driver=driver).exists())
 
     @patch("bot.views.edit_group_message")
     @patch("bot.views.answer_callback_query")
@@ -789,6 +888,120 @@ class BotWebhookTests(TestCase):
         driver.refresh_from_db()
         self.assertEqual(driver.license_number, "LIC-1")
 
+    @patch("bot.views.answer_callback_query")
+    @patch("bot.views.send_chat_message")
+    def test_onb_reverify_callback_starts_license_photo_step(self, _send, _answer):
+        driver = Driver.objects.create(
+            full_name="Reverify Driver",
+            phone="+998900000099",
+            telegram_user_id=901,
+            status=DriverStatus.OFFLINE,
+            verification_status=DriverVerificationStatus.REJECTED,
+            verification_reason="test",
+        )
+        DriverOnboardingState.objects.create(
+            telegram_user_id=901,
+            driver=driver,
+            is_active=False,
+            step="idle",
+            payload={"old": "x"},
+        )
+        payload = {
+            "callback_query": {
+                "id": "cb-reverify",
+                "from": {"id": 901, "username": "rv"},
+                "message": {"chat": {"id": 901}, "message_id": 1},
+                "data": "onb:reverify",
+            }
+        }
+        response = self.client.post(
+            reverse("telegram-webhook"),
+            data=payload,
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        state = DriverOnboardingState.objects.get(telegram_user_id=901)
+        self.assertTrue(state.is_active)
+        self.assertEqual(state.step, "onb_license_photo")
+        self.assertEqual(state.payload, {})
+
+    @patch("bot.views.send_chat_message")
+    def test_start_when_connected_pending_shows_review_message_not_approved_idle(self, send_mock):
+        driver = Driver.objects.create(
+            full_name="Pending Start",
+            phone="+998900000088",
+            telegram_user_id=902,
+            status=DriverStatus.OFFLINE,
+            verification_status=DriverVerificationStatus.PENDING,
+        )
+        Vehicle.objects.create(
+            driver=driver,
+            plate_number="01P902AA",
+            vehicle_type="Tanker",
+            capacity_ton=Decimal("10.00"),
+        )
+        payload = {
+            "message": {
+                "message_id": 201,
+                "chat": {"id": 902},
+                "from": {"id": 902, "username": "pd"},
+                "text": "/start",
+            }
+        }
+        response = self.client.post(
+            reverse("telegram-webhook"),
+            data=payload,
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        texts: list[str] = []
+        for call in send_mock.call_args_list:
+            if call.args and len(call.args) >= 2:
+                texts.append(str(call.args[1]))
+            if call.kwargs.get("text"):
+                texts.append(str(call.kwargs["text"]))
+        joined = " ".join(texts)
+        self.assertIn("tekshiruvda", joined.lower())
+        self.assertNotIn("Hozir faol reys yo‘q", joined)
+
+    @patch("bot.views.send_chat_message")
+    def test_start_when_connected_rejected_includes_reverify_callback(self, send_mock):
+        driver = Driver.objects.create(
+            full_name="Rejected Start",
+            phone="+998900000087",
+            telegram_user_id=903,
+            status=DriverStatus.OFFLINE,
+            verification_status=DriverVerificationStatus.REJECTED,
+            verification_reason="x",
+        )
+        Vehicle.objects.create(
+            driver=driver,
+            plate_number="01R903AA",
+            vehicle_type="Tanker",
+            capacity_ton=Decimal("10.00"),
+        )
+        payload = {
+            "message": {
+                "message_id": 202,
+                "chat": {"id": 903},
+                "from": {"id": 903, "username": "rj"},
+                "text": "/start",
+            }
+        }
+        response = self.client.post(
+            reverse("telegram-webhook"),
+            data=payload,
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        found = False
+        for call in send_mock.call_args_list:
+            rm = call.kwargs.get("reply_markup")
+            if rm and "onb:reverify" in str(rm):
+                found = True
+                break
+        self.assertTrue(found)
+
     @patch("bot.views.send_chat_message")
     def test_driver_command_with_explicit_order_id(self, _send_chat_message):
         driver = Driver.objects.create(
@@ -834,6 +1047,7 @@ class BotWebhookTests(TestCase):
         self.assertEqual(normalize_driver_reply_text("🚛 Safarni boshlash"), "/start_trip")
         self.assertEqual(normalize_driver_reply_text("/start_trip"), "/start_trip")
         self.assertEqual(normalize_driver_reply_text("🗺 Reys xaritasi"), "/trip_map")
+        self.assertEqual(normalize_driver_reply_text(BTN_REPLY_ADD_VEHICLE), "/add_vehicle")
 
     @override_settings(TRIP_MAP_SHOW_YANDEX_LINKS=True)
     def test_start_trip_message_includes_yandex_route_when_flag_on(self):

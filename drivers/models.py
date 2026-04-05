@@ -91,6 +91,8 @@ class Vehicle(models.Model):
     capacity_ton = models.DecimalField(max_digits=8, decimal_places=2)
     registration_document_number = models.CharField(max_length=64, blank=True)
     registration_photo_file_id = models.CharField(max_length=255, blank=True)
+    front_photo_file_id = models.CharField(max_length=255, blank=True)
+    rear_photo_file_id = models.CharField(max_length=255, blank=True)
     calibration_expires_at = models.DateField(null=True, blank=True)
     tanker_document_photo_file_id = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

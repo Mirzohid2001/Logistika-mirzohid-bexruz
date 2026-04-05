@@ -31,7 +31,7 @@ BTN_REPLY_HELP = "📋 Yordam"
 BTN_REPLY_WIZARD = "🧙 Tezkor menyu"
 BTN_REPLY_WIZARD_TAXI = "🚕 Tezkor menyu"
 BTN_REPLY_TRIP_MAP = "🗺 Reys xaritasi"
-BTN_REPLY_ADD_VEHICLE = "➕ Mashina qo‘shish"
+BTN_REPLY_ADD_VEHICLE = "➕ Qo‘shimcha mashina"
 
 
 def driver_reply_button_aliases() -> dict[str, str]:
