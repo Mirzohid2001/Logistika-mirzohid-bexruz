@@ -5,6 +5,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0f172a">
+  <script>
+    (function () {
+      var stored = localStorage.getItem("shofir-theme");
+      if (stored === "dark" || stored === "light") {
+        document.documentElement.setAttribute("data-theme", stored);
+      }
+    })();
+  </script>
   <title>{% block title %}Shofir{% endblock %}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -28,6 +36,7 @@
           <span class="brand-tagline">Logistika paneli</span>
         </span>
       </a>
+      <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Mavzuni almashtirish">🌙</button>
       <button
         type="button"
         class="nav-toggle"
@@ -114,6 +123,27 @@
   ></script>
   <script>
     (function () {
+      var themeToggle = document.getElementById("theme-toggle");
+      var root = document.documentElement;
+      function currentTheme() {
+        var explicit = root.getAttribute("data-theme");
+        if (explicit === "dark" || explicit === "light") return explicit;
+        return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+      function applyTheme(theme) {
+        root.setAttribute("data-theme", theme);
+        localStorage.setItem("shofir-theme", theme);
+        if (themeToggle) {
+          themeToggle.textContent = theme === "dark" ? "☀️" : "🌙";
+          themeToggle.setAttribute("aria-label", theme === "dark" ? "Yorug‘ rejimga o‘tish" : "Qorong‘i rejimga o‘tish");
+        }
+      }
+      if (themeToggle) {
+        applyTheme(currentTheme());
+        themeToggle.addEventListener("click", function () {
+          applyTheme(currentTheme() === "dark" ? "light" : "dark");
+        });
+      }
       var toggle = document.getElementById("nav-toggle");
       var backdrop = document.getElementById("nav-backdrop");
       var nav = document.getElementById("primary-nav");

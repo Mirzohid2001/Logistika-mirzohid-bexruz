@@ -57,6 +57,30 @@ ORDER_STATUS_LABELS_UZ = {
     "canceled": "Bekor",
     "issue": "Muammo",
 }
+ORDER_PRESET_LABELS_UZ = {
+    "today": "Bugungi reyslar",
+    "sla_risk": "SLA buzilish xavfi",
+    "mine": "Mening buyurtmalarim",
+}
+
+
+def _orders_active_statuses():
+    return [
+        OrderStatus.NEW,
+        OrderStatus.OFFERED,
+        OrderStatus.ASSIGNED,
+        OrderStatus.IN_TRANSIT,
+    ]
+
+
+def _apply_sla_flags(orders, now, risk_minutes: int):
+    risk_cutoff = now + datetime.timedelta(minutes=max(1, int(risk_minutes)))
+    active_statuses = set(_orders_active_statuses())
+    for order in orders:
+        is_active = order.status in active_statuses
+        deadline = getattr(order, "sla_deadline_at", None)
+        order.is_sla_delayed = bool(is_active and deadline and deadline < now)
+        order.is_sla_risk = bool(is_active and deadline and now <= deadline <= risk_cutoff)
 
 
 def _extract_coords_for_route(text: str) -> tuple[float, float] | None:
@@ -134,6 +158,7 @@ def _form_errors_text(form) -> str:
 def _orders_preserve_get_params(request) -> str:
     p = request.GET.copy()
     p.pop("page", None)
+    p.pop("save_view", None)
     return p.urlencode()
 
 
@@ -240,32 +265,45 @@ def _custody_cells_for_list(
 def order_list(request):
     try:
         qs = Order.objects.select_related("client", "assignment__driver").order_by("-created_at")
+        saved_view = request.session.get("orders_list_saved_view") or {}
+        has_explicit_filters = any(k != "page" for k in request.GET.keys())
         preset = (request.GET.get("preset") or "").strip()
+        if not preset and not has_explicit_filters:
+            preset = str(saved_view.get("preset") or "").strip()
         status = (request.GET.get("status") or "").strip()
         search_q = (request.GET.get("q") or "").strip()
         date_str = (request.GET.get("date") or "").strip()
         driver_filter = (request.GET.get("driver") or "").strip()
         client_filter = (request.GET.get("client") or "").strip()
-        view_mode = (request.GET.get("view") or "full").strip()
+        view_mode = (request.GET.get("view") or "").strip() or str(saved_view.get("view_mode") or "full")
         if view_mode not in {"full", "minimal"}:
             view_mode = "full"
 
         if preset == "today":
             date_str = timezone.localdate().isoformat()
 
-        active_statuses = [
-            OrderStatus.NEW,
-            OrderStatus.OFFERED,
-            OrderStatus.ASSIGNED,
-            OrderStatus.IN_TRANSIT,
-        ]
+        active_statuses = _orders_active_statuses()
         now = timezone.now()
+        risk_minutes = int(getattr(dj_settings, "ORDER_SLA_RISK_MINUTES", 45) or 45)
         if preset == "delayed":
             qs = qs.filter(
                 sla_deadline_at__isnull=False,
                 sla_deadline_at__lt=now,
                 status__in=active_statuses,
             )
+        elif preset == "sla_risk":
+            qs = qs.filter(
+                sla_deadline_at__isnull=False,
+                sla_deadline_at__gte=now,
+                sla_deadline_at__lte=now + datetime.timedelta(minutes=risk_minutes),
+                status__in=active_statuses,
+            )
+        elif preset == "mine":
+            username = (getattr(request.user, "username", "") or "").strip()
+            if username:
+                qs = qs.filter(assignment__assigned_by=username)
+            else:
+                qs = qs.none()
         elif preset == "active" and status not in {c[0] for c in OrderStatus.choices}:
             qs = qs.filter(status__in=active_statuses)
 
@@ -328,6 +366,10 @@ def order_list(request):
                 order.live_ping_age_sec = age
                 order.live_ping_age_label = _format_age_short(age)
                 order.live_ping_stale = age >= stale_sec
+        _apply_sla_flags(visible_orders, now, risk_minutes)
+        if request.GET.get("save_view") == "1":
+            request.session["orders_list_saved_view"] = {"preset": preset, "view_mode": view_mode}
+            request.session.modified = True
         drivers_qs = Driver.objects.order_by("full_name")[:800]
         clients_qs = Client.objects.filter(is_active=True).order_by("name")[:800]
         return render(
@@ -347,6 +389,9 @@ def order_list(request):
                 "client_filter": client_filter,
                 "preset": preset,
                 "view_mode": view_mode,
+                "saved_view_preset": str(saved_view.get("preset") or ""),
+                "saved_view_preset_label": ORDER_PRESET_LABELS_UZ.get(str(saved_view.get("preset") or ""), "Hammasi"),
+                "sla_risk_minutes": risk_minutes,
                 "request_params": _orders_preserve_get_params(request),
                 "drivers_for_filter": drivers_qs,
                 "clients_for_filter": clients_qs,

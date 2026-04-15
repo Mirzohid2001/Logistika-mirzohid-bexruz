@@ -41,30 +41,28 @@
 </div>
 
 <div class="stats-grid">
-  <div class="card stat-card">
-    <p class="stat-label">Aktiv yuklar</p>
-    <p class="stat-value">{{ active_orders_count }}</p>
+  <div class="card stat-card" data-kpi-card="today_orders_count">
+    <p class="stat-label">Bugungi buyurtma</p>
+    <p class="stat-value" data-kpi="today_orders_count">{{ today_orders_count }}</p>
+    <p class="stat-trend" data-kpi-trend="today_orders_count">--</p>
   </div>
-  <div class="card stat-card">
-    <p class="stat-label">Bugun bajarilgan</p>
-    <p class="stat-value">{{ completed_today_count }}</p>
+  <div class="card stat-card" data-kpi-card="delayed_orders_count" data-kpi-warning="true">
+    <p class="stat-label">Kechikkanlar (SLA)</p>
+    <p class="stat-value" data-kpi="delayed_orders_count">{{ delayed_orders_count }}</p>
+    <p class="stat-trend" data-kpi-trend="delayed_orders_count">--</p>
   </div>
-  <div class="card stat-card">
+  <div class="card stat-card" data-kpi-card="drivers_available_count">
     <p class="stat-label">Bo‘sh shofyorlar</p>
-    <p class="stat-value">{{ drivers_available_count }}</p>
+    <p class="stat-value" data-kpi="drivers_available_count">{{ drivers_available_count }}</p>
+    <p class="stat-trend" data-kpi-trend="drivers_available_count">--</p>
   </div>
-  <div class="card stat-card">
-    <p class="stat-label">Band shofyorlar</p>
-    <p class="stat-value">{{ drivers_busy_count }}</p>
-  </div>
-  <div class="card stat-card" {% if pending_driver_verifications_count %}style="border-left:4px solid #c0392b"{% endif %}>
-    <p class="stat-label">Tasdiq kutilmoqda (bot)</p>
-    <p class="stat-value">{{ pending_driver_verifications_count }}</p>
-    {% if pending_driver_verifications_count %}
-      <p class="muted" style="margin-top:8px"><a href="{% url 'ops-dashboard' %}">Operatsion panel → tasdiqlar</a></p>
-    {% endif %}
+  <div class="card stat-card" data-kpi-card="active_orders_count">
+    <p class="stat-label">Aktiv reys</p>
+    <p class="stat-value" data-kpi="active_orders_count">{{ active_orders_count }}</p>
+    <p class="stat-trend" data-kpi-trend="active_orders_count">--</p>
   </div>
 </div>
+<p class="muted" id="home-kpi-refresh-state">Oxirgi yangilanish: hozir</p>
 
 {% if not safe_mode %}
 <div class="card card--emphasis">
@@ -251,4 +249,80 @@
     </table>
   </div>
 </div>
+<script>
+  (function () {
+    var endpoint = "{% url 'home-kpis' %}";
+    var refreshLabel = document.getElementById("home-kpi-refresh-state");
+    var kpiNodes = document.querySelectorAll("[data-kpi]");
+    var trendNodes = document.querySelectorAll("[data-kpi-trend]");
+    var cardNodes = document.querySelectorAll("[data-kpi-card]");
+    var historyByKpi = {};
+    var trendWindowMs = 5 * 60 * 1000;
+    if (!kpiNodes.length) return;
+    function getTrendLabel(delta) {
+      if (delta > 0) return "▲ +" + delta + " · So‘nggi 5 daqiqa";
+      if (delta < 0) return "▼ " + delta + " · So‘nggi 5 daqiqa";
+      return "• 0 · So‘nggi 5 daqiqa";
+    }
+    function setCardStates(payload) {
+      cardNodes.forEach(function (card) {
+        var key = card.getAttribute("data-kpi-card");
+        var value = Number(payload[key] || 0);
+        if (card.getAttribute("data-kpi-warning") === "true") {
+          card.classList.toggle("stat-card--warning", value > 0);
+        }
+      });
+    }
+    function setTrends(payload) {
+      var nowMs = Date.now();
+      trendNodes.forEach(function (node) {
+        var key = node.getAttribute("data-kpi-trend");
+        var nextValue = Number(payload[key] || 0);
+        if (!historyByKpi[key]) historyByKpi[key] = [];
+        historyByKpi[key].push({ at: nowMs, value: nextValue });
+        historyByKpi[key] = historyByKpi[key].filter(function (sample) {
+          return nowMs - sample.at <= trendWindowMs;
+        });
+        var baseline = historyByKpi[key][0];
+        node.classList.remove("stat-trend--up", "stat-trend--down", "stat-trend--flat");
+        if (!baseline) {
+          node.classList.add("stat-trend--flat");
+          node.textContent = "• 0 · So‘nggi 5 daqiqa";
+          return;
+        }
+        var delta = nextValue - baseline.value;
+        if (delta > 0) node.classList.add("stat-trend--up");
+        else if (delta < 0) node.classList.add("stat-trend--down");
+        else node.classList.add("stat-trend--flat");
+        node.textContent = getTrendLabel(delta);
+      });
+    }
+    function setValues(payload) {
+      kpiNodes.forEach(function (node) {
+        var key = node.getAttribute("data-kpi");
+        if (Object.prototype.hasOwnProperty.call(payload, key)) {
+          node.textContent = payload[key];
+        }
+      });
+      setCardStates(payload);
+      setTrends(payload);
+      if (!refreshLabel) return;
+      var stamp = payload.refreshed_at ? new Date(payload.refreshed_at) : new Date();
+      refreshLabel.textContent = "Oxirgi yangilanish: " + stamp.toLocaleTimeString("uz-UZ");
+    }
+    function refresh() {
+      fetch(endpoint, { headers: { "X-Requested-With": "XMLHttpRequest" } })
+        .then(function (response) {
+          if (!response.ok) throw new Error("Request failed");
+          return response.json();
+        })
+        .then(setValues)
+        .catch(function () {
+          if (refreshLabel) refreshLabel.textContent = "Oxirgi yangilanish: xatolik";
+        });
+    }
+    refresh();
+    window.setInterval(refresh, 30000);
+  })();
+</script>
 {% endblock %}

@@ -15,15 +15,15 @@
     <p class="muted" style="margin-top:6px">Xavfsiz rejim faol: ba'zi legacy raqam qiymatlari normallashtirildi.</p>
   {% endif %}
   <p class="muted" style="margin-top:10px;font-size:0.82rem">
-    <span class="status-pill status-pill--new">Yangi / Taklif</span>
-    <span class="status-pill status-pill--assigned" style="margin-left:4px">Biriktirilgan</span>
-    <span class="status-pill status-pill--in-transit" style="margin-left:4px">Yo‘lda</span>
+    <span class="status-pill status-pill--new">Yangi</span>
+    <span class="status-pill status-pill--in-progress" style="margin-left:4px">Jarayonda</span>
+    <span class="status-pill status-pill--delayed" style="margin-left:4px">Kechikkan</span>
     <span class="status-pill status-pill--completed" style="margin-left:4px">Yakunlangan</span>
-    <span class="status-pill status-pill--issue" style="margin-left:4px">Muammo / Bekor</span>
   </p>
   <div class="actions">
     <a class="btn" href="{% url 'order-create' %}">Yangi buyurtma</a>
     <a class="btn btn-secondary" href="{% url 'ops-dashboard' %}">Operatsion panel</a>
+    <button type="button" class="btn btn-secondary" id="orders-refresh-toggle" aria-pressed="true">Auto-refresh: ON</button>
   </div>
 
   {% if not safe_mode %}
@@ -45,10 +45,14 @@
     <div class="saved-filter-bar" role="group" aria-label="Tezkor filtrlar">
       <span class="saved-filter-bar__label muted small">Tezkor:</span>
       <a class="filter-chip{% if preset == 'today' %} filter-chip--active{% endif %}" href="{% url 'order-list' %}?preset=today{% if view_mode == 'minimal' %}&amp;view=minimal{% endif %}">Bugungi reyslar</a>
-      <a class="filter-chip{% if preset == 'delayed' %} filter-chip--active{% endif %}" href="{% url 'order-list' %}?preset=delayed{% if view_mode == 'minimal' %}&amp;view=minimal{% endif %}">Kechikkanlar (SLA)</a>
-      <a class="filter-chip{% if preset == 'active' %} filter-chip--active{% endif %}" href="{% url 'order-list' %}?preset=active{% if view_mode == 'minimal' %}&amp;view=minimal{% endif %}">Faol buyurtmalar</a>
+      <a class="filter-chip{% if preset == 'sla_risk' %} filter-chip--active{% endif %}" href="{% url 'order-list' %}?preset=sla_risk{% if view_mode == 'minimal' %}&amp;view=minimal{% endif %}">SLA buzilish xavfi ({{ sla_risk_minutes }}m)</a>
+      <a class="filter-chip{% if preset == 'mine' %} filter-chip--active{% endif %}" href="{% url 'order-list' %}?preset=mine{% if view_mode == 'minimal' %}&amp;view=minimal{% endif %}">Mening buyurtmalarim</a>
       <a class="filter-chip" href="{% url 'order-list' %}{% if view_mode == 'minimal' %}?view=minimal{% endif %}">Hammasi</a>
+      <button type="submit" name="save_view" value="1" class="btn btn-outline-secondary btn-sm">View’ni saqlash</button>
     </div>
+    {% if saved_view_preset %}
+      <p class="muted small" style="margin-top:8px">Saqlangan view: <b>{{ saved_view_preset_label }}</b></p>
+    {% endif %}
 
     <div class="row g-2 align-items-end flex-wrap" style="margin-top:12px">
       <div class="col-auto">
@@ -225,4 +229,41 @@
   </div>
 </div>
 {% endif %}
+<script>
+  (function () {
+    var storageKey = "orders-list-auto-refresh";
+    var toggleButton = document.getElementById("orders-refresh-toggle");
+    var intervalMs = 30000;
+    var isEnabled = localStorage.getItem(storageKey);
+    if (isEnabled === null) isEnabled = "1";
+    var isReloading = false;
+    function syncToggleLabel() {
+      if (!toggleButton) return;
+      var on = isEnabled === "1";
+      toggleButton.textContent = on ? "Auto-refresh: ON" : "Auto-refresh: OFF";
+      toggleButton.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    function shouldSkipRefresh() {
+      if (document.hidden) return true;
+      var active = document.activeElement;
+      if (!active) return false;
+      return active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT";
+    }
+    function refreshPage() {
+      if (isEnabled !== "1") return;
+      if (isReloading || shouldSkipRefresh()) return;
+      isReloading = true;
+      window.location.reload();
+    }
+    if (toggleButton) {
+      syncToggleLabel();
+      toggleButton.addEventListener("click", function () {
+        isEnabled = isEnabled === "1" ? "0" : "1";
+        localStorage.setItem(storageKey, isEnabled);
+        syncToggleLabel();
+      });
+    }
+    window.setInterval(refreshPage, intervalMs);
+  })();
+</script>
 {% endblock %}
