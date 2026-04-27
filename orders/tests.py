@@ -12,6 +12,7 @@ from drivers.models import Driver, DriverStatus
 from decimal import Decimal
 from bot.models import TelegramMessageLog
 from analytics.models import AlertEvent, AlertType
+from tracking.models import LocationPing, LocationSource
 
 from orders.models import (
     Client,
@@ -433,6 +434,30 @@ class OrderDomainDeepeningTests(TestCase):
         self.assertEqual(restore_response.status_code, 302)
         created.refresh_from_db()
         self.assertTrue(created.is_active)
+
+    def test_order_live_location_stream_returns_sse_payload(self):
+        driver = Driver.objects.create(
+            full_name="Stream Driver",
+            phone="+998901111100",
+            status=DriverStatus.BUSY,
+        )
+        Assignment.objects.create(order=self.order, driver=driver, assigned_by="dispatcher")
+        LocationPing.objects.create(
+            order=self.order,
+            driver=driver,
+            latitude="41.3111111",
+            longitude="69.2444444",
+            source=LocationSource.TELEGRAM,
+            captured_at=timezone.now(),
+        )
+        response = self.client.get(reverse("order-live-location-stream", args=[self.order.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/event-stream")
+        chunk = next(iter(response.streaming_content))
+        if isinstance(chunk, bytes):
+            chunk = chunk.decode("utf-8")
+        self.assertIn("event: order_live", chunk)
+        self.assertIn('"ok": true', chunk.lower())
 
     def test_cleanup_orders_data_command(self):
         order = Order.objects.create(

@@ -625,21 +625,43 @@
     if (bounds.length > 0) map.fitBounds(bounds, { padding: [20, 20] });
 
     const liveUrl = "{% url 'order-live-location' order.pk %}";
+    const liveStreamUrl = "{% url 'order-live-location-stream' order.pk %}";
+    function applyLiveData(data) {
+      if (data && data.ok) {
+        if (Array.isArray(data.trail) && data.trail.length > 1) setTrail(data.trail);
+        setDriverMarker(data);
+      }
+    }
     async function pollLive() {
       try {
         const res = await fetch(liveUrl, { headers: { "Accept": "application/json" } });
         const data = await res.json();
-        if (data && data.ok) {
-          if (Array.isArray(data.trail) && data.trail.length > 1) setTrail(data.trail);
-          setDriverMarker(data);
-        }
+        applyLiveData(data);
       } catch (e) {
-        // Silent — oflayn bo'lsa ham UI yiqilmasin.
       }
     }
 
-    setInterval(pollLive, 3000);
-    pollLive();
+    let livePollTimer = null;
+    function startLivePollingFallback() {
+      if (livePollTimer) return;
+      livePollTimer = setInterval(pollLive, 3000);
+      pollLive();
+    }
+
+    if (typeof EventSource !== "undefined") {
+      const source = new EventSource(liveStreamUrl);
+      source.addEventListener("order_live", function (event) {
+        try {
+          applyLiveData(JSON.parse(event.data || "{}"));
+        } catch (e) {}
+      });
+      source.onerror = function () {
+        source.close();
+        startLivePollingFallback();
+      };
+    } else {
+      startLivePollingFallback();
+    }
     setTimeout(function () { map.invalidateSize(); }, 200);
   }
 </script>

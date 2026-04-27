@@ -127,6 +127,19 @@ class AnalyticsReportTests(TestCase):
         self.assertIn("markers", data)
         self.assertIn("missing_live", data)
 
+    def test_live_fleet_stream_returns_sse_payload(self):
+        user = User.objects.create_user(username="staff_fleet_stream", password="x", is_staff=True)
+        user.groups.add(self.analyst_group)
+        self.client.force_login(user)
+        response = self.client.get(reverse("live-fleet-stream"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/event-stream")
+        chunk = next(iter(response.streaming_content))
+        if isinstance(chunk, bytes):
+            chunk = chunk.decode("utf-8")
+        self.assertIn("event: fleet", chunk)
+        self.assertIn('"ok": true', chunk.lower())
+
     def test_live_fleet_data_contains_freshness_and_no_live_alert_flags(self):
         in_transit_order = Order.objects.create(
             client=self.client_obj,

@@ -5,7 +5,7 @@ from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
 from django.db import DatabaseError, connection, transaction
 from django.db.models import Q
-from django.http import JsonResponse
+from django.http import JsonResponse, StreamingHttpResponse
 from django.utils import timezone
 from django.shortcuts import get_object_or_404, redirect, render
 from decimal import Decimal
@@ -13,6 +13,7 @@ from decimal import InvalidOperation
 import datetime
 import json
 import re
+import time
 
 from bot.services import driver_idle_reply_keyboard, send_chat_message, send_ops_notification, send_order_to_group
 from common.permissions import WEB_OPERATION_GROUPS, WEB_PANEL_GROUPS, groups_required
@@ -635,6 +636,13 @@ def order_detail(request, pk: int):
 @staff_member_required
 def order_live_location(request, pk: int):
     order = get_object_or_404(Order, pk=pk)
+    payload = _order_live_payload(order)
+    if payload is None:
+        return JsonResponse({"ok": False})
+    return JsonResponse(payload)
+
+
+def _order_live_payload(order: Order) -> dict | None:
     max_pts = int(getattr(dj_settings, "ORDER_LIVE_TRAIL_MAX_POINTS", 400) or 400)
     max_pts = max(10, min(max_pts, 2000))
     pings = list(
@@ -643,23 +651,42 @@ def order_live_location(request, pk: int):
         .select_related("driver")[:max_pts]
     )
     if not pings:
-        return JsonResponse({"ok": False})
+        return None
     latest_ping = pings[0]
     trail_chrono = list(reversed(pings))
     trail = [
         {"lat": float(p.latitude), "lon": float(p.longitude), "captured_at": p.captured_at.isoformat()}
         for p in trail_chrono
     ]
-    return JsonResponse(
-        {
-            "ok": True,
-            "driver": latest_ping.driver.full_name,
-            "lat": float(latest_ping.latitude),
-            "lon": float(latest_ping.longitude),
-            "captured_at": latest_ping.captured_at.isoformat(),
-            "trail": trail,
-        }
-    )
+    return {
+        "ok": True,
+        "driver": latest_ping.driver.full_name,
+        "lat": float(latest_ping.latitude),
+        "lon": float(latest_ping.longitude),
+        "captured_at": latest_ping.captured_at.isoformat(),
+        "trail": trail,
+    }
+
+
+@staff_member_required
+def order_live_location_stream(request, pk: int):
+    order = get_object_or_404(Order, pk=pk)
+
+    def event_stream():
+        last_signature = ""
+        for _ in range(120):
+            payload = _order_live_payload(order)
+            if payload is not None:
+                signature = json.dumps(payload, sort_keys=True, default=str)
+                if signature != last_signature:
+                    yield f"event: order_live\ndata: {json.dumps(payload, default=str)}\n\n"
+                    last_signature = signature
+            time.sleep(1)
+
+    response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+    response["Cache-Control"] = "no-cache"
+    response["X-Accel-Buffering"] = "no"
+    return response
 
 
 @staff_member_required

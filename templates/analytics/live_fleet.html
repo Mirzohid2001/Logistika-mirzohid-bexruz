@@ -126,6 +126,7 @@
 
 <script>
   const dataUrl = "{% url 'live-fleet-data' %}";
+  const streamUrl = "{% url 'live-fleet-stream' %}";
   const initial = JSON.parse(document.getElementById("fleet-markers-initial").textContent || "[]");
   const mapNode = document.getElementById("fleetLiveMap");
   const updatedEl = document.getElementById("fleet-updated");
@@ -286,30 +287,53 @@
       .catch(function () {});
   });
 
+  function applyPayload(data) {
+    if (data && data.ok) {
+      renderOrUpdate(data.markers);
+      renderTables(data.markers || [], data.missing_live || []);
+      const miss = (data.missing_live || []).length;
+      const stale = (data.markers || []).filter((x) => x.is_stale).length;
+      updatedEl.textContent =
+        "Oxirgi yangilanish: " +
+        (data.server_time || "") +
+        " · Live yo‘q: " + miss + " ta reys" +
+        (stale ? " · Eskirgan: " + stale : "");
+    }
+  }
+
   async function poll() {
     if (document.visibilityState === "hidden") return;
     try {
       const res = await fetch(dataUrl, { headers: { Accept: "application/json" } });
       const data = await res.json();
-      if (data && data.ok) {
-        renderOrUpdate(data.markers);
-        renderTables(data.markers || [], data.missing_live || []);
-        const miss = (data.missing_live || []).length;
-        const stale = (data.markers || []).filter((x) => x.is_stale).length;
-        updatedEl.textContent =
-          "Oxirgi yangilanish: " +
-          (data.server_time || "") +
-          " · Live yo‘q: " + miss + " ta reys" +
-          (stale ? " · Eskirgan: " + stale : "");
-      }
+      applyPayload(data);
     } catch (e) {
       updatedEl.textContent = "Tarmoq xatosi — keyinroq qayta uriniladi.";
     }
   }
 
-  const pollMs = 3000;
-  setInterval(poll, pollMs);
-  poll();
+  let pollTimer = null;
+  function startPollingFallback() {
+    if (pollTimer) return;
+    pollTimer = setInterval(poll, 3000);
+    poll();
+  }
+
+  if (typeof EventSource !== "undefined") {
+    const source = new EventSource(streamUrl);
+    source.addEventListener("fleet", function (event) {
+      try {
+        const data = JSON.parse(event.data || "{}");
+        applyPayload(data);
+      } catch (e) {}
+    });
+    source.onerror = function () {
+      source.close();
+      startPollingFallback();
+    };
+  } else {
+    startPollingFallback();
+  }
 
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState === "visible") {

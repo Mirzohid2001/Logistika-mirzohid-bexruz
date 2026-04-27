@@ -1,5 +1,6 @@
 import csv
 import json
+import time
 from datetime import date
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -10,7 +11,7 @@ from django.contrib.admin.views.decorators import staff_member_required
 from django.core.cache import cache
 from django.core.paginator import Paginator
 from django.db.models import Avg, Count, F, Q, Sum
-from django.http import HttpResponse, JsonResponse
+from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from reportlab.lib.pagesizes import A4
@@ -742,3 +743,22 @@ def live_fleet_map(request):
 @groups_required(*WEB_PANEL_GROUPS)
 def live_fleet_data(request):
     return JsonResponse({"ok": True, **_live_fleet_payload(), "server_time": timezone.now().isoformat()})
+
+
+@staff_member_required
+@groups_required(*WEB_PANEL_GROUPS)
+def live_fleet_stream(request):
+    def event_stream():
+        last_signature = ""
+        for _ in range(120):
+            payload = {"ok": True, **_live_fleet_payload(), "server_time": timezone.now().isoformat()}
+            signature = json.dumps(payload, sort_keys=True, default=str)
+            if signature != last_signature:
+                yield f"event: fleet\ndata: {json.dumps(payload, default=str)}\n\n"
+                last_signature = signature
+            time.sleep(1)
+
+    response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+    response["Cache-Control"] = "no-cache"
+    response["X-Accel-Buffering"] = "no"
+    return response

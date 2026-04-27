@@ -14,6 +14,7 @@ from .views import (
     generate_monthly_report,
     live_fleet_data,
     live_fleet_map,
+    live_fleet_stream,
     ops_dashboard,
 )
 
@@ -23,6 +24,7 @@ urlpatterns = [
     path("dashboard/", ops_dashboard, name="ops-dashboard"),
     path("live-fleet/", live_fleet_map, name="live-fleet-map"),
     path("live-fleet/data/", live_fleet_data, name="live-fleet-data"),
+    path("live-fleet/stream/", live_fleet_stream, name="live-fleet-stream"),
     path("generate-monthly/", generate_monthly_report, name="generate-monthly-report"),
     path("export/clients.csv", export_clients_report_csv, name="export-clients-report-csv"),
     path("export/clients.pdf", export_clients_report_pdf, name="export-clients-report-pdf"),
